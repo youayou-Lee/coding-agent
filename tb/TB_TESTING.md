@@ -14,14 +14,20 @@
 
 ## 1. 网络适配（本机关键，缺一不可）
 
-TB 的测试脚本默认要联网下载 uv（astral.sh，本机被墙），apt/pypi 也有各自的坑。适配方案：
+TB 的测试脚本默认要联网下载 uv（astral.sh，本机被墙）。**本机方案：直接挂载宿主的 uv 二进制进容器**（宿主机 ~/.local/bin/uv，Linux x86_64，容器同为 Ubuntu 24.04 x86_64，可直接运行）——测试阶段零 uv 下载，pytest 从阿里云镜像直连安装。
 
-- **任务副本**（`/tmp/tb-tasks/analyze-access-logs/`）的 `docker-compose.yaml`：
-  - `network_mode: host`（容器共享宿主网络，127.0.0.1:7890 代理可用）
-  - 代理环境变量 + `NO_PROXY=archive.ubuntu.com,...`（apt 直连快）
-- **run-tests.sh**：不下载 uv，直接 `pip install pytest`（阿里云镜像直连）+ 跑 pytest
+适配方案（任务副本 `tb/tasks/<任务>/`）：
+
+- **docker-compose.yaml**：
+  - `network_mode: host`（容器共享宿主网络）
+  - `NO_PROXY=archive.ubuntu.com,...`（apt 直连快，不绕代理）
+  - volume 挂载宿主 uv：`/home/you/.local/bin/uv:/usr/local/bin/uv:ro`
+- **run-tests.sh**：不下载 uv，直接用挂载的 uv 建 venv + 从阿里云镜像装 pytest + 跑测试
 - **Dockerfile**：只 COPY（构建零网络，秒级）
-- 官方任务跑之前要先复制到 `/tmp/tb-tasks/` 并套用上述改造（或统一改 `/tmp/terminal-bench-1` 副本）
+
+> 备选：如果你换了能快速访问 astral.sh 的代理节点，官方 run-tests.sh（下载 uv）原样可用——当时卡住是 FlClash 节点到 astral.sh 限速 ~16KB/s（15MB 二进制需 15 分钟+），不是 uv 本身的问题。挂载方案与代理快慢完全无关，更稳。
+
+官方任务跑之前要先复制到 `tb/tasks/` 并套用上述改造。
 
 ## 2. 链路验证（oracle，不需要 LLM/API）
 
@@ -84,9 +90,8 @@ runs/<时间戳>/
 
 ## 6. 本机网络事实（为什么这么适配）
 
-- astral.sh（uv 下载站）：直连被墙；走 127.0.0.1:7890 代理可通但限速 ~18KB/s → 测试脚本不能用 uv
+- astral.sh（uv 下载站）：直连被墙；走 127.0.0.1:7890 代理可通但当前节点限速 ~16KB/s → **不下载 uv，改为挂载宿主 uv 二进制进容器**（同架构同 glibc，直接可跑）
 - archive.ubuntu.com：容器默认网络直连快（NO_PROXY 排除后）
 - pypi.org：直连被墙；**阿里云镜像**（mirrors.aliyun.com/pypi/simple/）直连快
 - 清华 pypi 镜像：pytest 包 403（2026 年策略变化），弃用
-- Ubuntu 24.04 pip：PEP 668 阻止系统安装 → 必须 `--break-system-packages`
-- Ubuntu 24.04 apt 无 `uv` 包 → 用 pip 装 pytest，不用 uv
+- Ubuntu 24.04 pip：PEP 668 阻止系统安装 → 用 uv（挂载的宿主版）建 venv 装 pytest，天然规避
