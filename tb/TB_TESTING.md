@@ -8,7 +8,7 @@
 |---|---|
 | tb CLI | `uv tool install terminal-bench --with agno`（--with agno 让 tb 环境能 import agno） |
 | Docker | 29.2.0，daemon 运行中 |
-| 任务集 | 官方：`/tmp/terminal-bench-1/original-tasks`（241 任务）；本地改造版：`/tmp/tb-tasks` |
+| 任务集 | registry 官方数据集（持久化在 `tb/datasets/terminal-bench-core`，80 任务）；本地改造版：`tb/tasks/`（6 任务） |
 | API Key / 模型 | 项目根 `.env`：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL（当前 GLM glm-5.3-flash，OpenAI 兼容协议） |
 | PYTHONPATH | 必须指向 lab 根（adapter 可导入） |
 
@@ -95,3 +95,23 @@ runs/<时间戳>/
 - pypi.org：直连被墙；**阿里云镜像**（mirrors.aliyun.com/pypi/simple/）直连快
 - 清华 pypi 镜像：pytest 包 403（2026 年策略变化），弃用
 - Ubuntu 24.04 pip：PEP 668 阻止系统安装 → 用 uv（挂载的宿主版）建 venv 装 pytest，天然规避
+
+
+## 7. C1 任务集（2026-08-31）
+
+来源：`tb datasets download --dataset terminal-bench-core==0.1.1`（持久化 `tb/datasets/`，不再放 /tmp）。
+改造版在 `tb/tasks/`，oracle 全过（6/6）：
+
+| 任务 | 类型 | 改造要点 |
+|---|---|---|
+| analyze-access-logs | 单文件脚本 | 原有（uv 挂载 + 阿里云 pytest） |
+| hello-world | 单文件脚本（冒烟） | 标准配方 |
+| csv-to-parquet | 数据转换 | 标准配方 + 测试时装 pandas/pyarrow；去掉构建期 apt curl |
+| fix-permissions | 调试修复 | 标准配方 |
+| sqlite-db-truncate | 调试修复（损坏 DB 恢复） | 标准配方 |
+| fix-pandas-version | 多文件项目（py3.8+pandas1.3） | 特殊：不能建 venv（会丢系统 pandas），系统 pip 装 pytest 7.x；**FROM 必须用 daocloud 源** |
+
+### 新增的两个网络事实
+
+- docker.io 被墙（auth.docker.io TLS 超时）。BuildKit 解析 `FROM python:3.8-slim-bookworm` 时即使本地有镜像也会去 docker.io 校验 manifest → 卡死。解法：FROM 直接写 `docker.m.daocloud.io/library/python:3.8-slim-bookworm`（先 `docker pull` 同地址再 tag）。
+- 容器内 `uv add` / pip 默认走 pypi.org（被墙）。compose 已注入 `UV_DEFAULT_INDEX` + `PIP_INDEX_URL`（阿里云镜像），oracle 解法与 Agent 运行期装包都受益。

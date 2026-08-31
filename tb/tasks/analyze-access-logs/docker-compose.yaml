@@ -10,6 +10,8 @@ services:
       - TEST_DIR=${T_BENCH_TEST_DIR}
       - NO_PROXY=archive.ubuntu.com,security.ubuntu.com,127.0.0.1,localhost
       - no_proxy=archive.ubuntu.com,security.ubuntu.com,127.0.0.1,localhost
+      - UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/
+      - PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
     volumes:
       - ${T_BENCH_TASK_LOGS_PATH}:${T_BENCH_CONTAINER_LOGS_PATH}
       - ${T_BENCH_TASK_AGENT_LOGS_PATH}:${T_BENCH_CONTAINER_AGENT_LOGS_PATH}

@@ -1,0 +1,20 @@
+services:
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${T_BENCH_TASK_DOCKER_CLIENT_IMAGE_NAME}
+    container_name: ${T_BENCH_TASK_DOCKER_CLIENT_CONTAINER_NAME}
+    network_mode: host
+    command: [ "sh", "-c", "sleep infinity" ]
+    environment:
+      - TEST_DIR=${T_BENCH_TEST_DIR}
+      - NO_PROXY=archive.ubuntu.com,security.ubuntu.com,127.0.0.1,localhost
+      - no_proxy=archive.ubuntu.com,security.ubuntu.com,127.0.0.1,localhost
+      - UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/
+      - PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+    volumes:
+      - ${T_BENCH_TASK_LOGS_PATH}:${T_BENCH_CONTAINER_LOGS_PATH}
+      - ${T_BENCH_TASK_AGENT_LOGS_PATH}:${T_BENCH_CONTAINER_AGENT_LOGS_PATH}
+      # Mount the host's uv binary (same arch, same glibc) — zero download.
+      - /home/you/.local/bin/uv:/usr/local/bin/uv:ro
