@@ -10,7 +10,8 @@ from pathlib import Path
 from agno.agent import Agent
 from agno.tools.decorator import tool
 
-from coding_agent.agno_compat import DeepSeekChat
+from coding_agent.agno_compat import OpenAICompatChat
+from coding_agent.config import LLM_MODEL
 from coding_agent.logging_util import RunLogger
 from coding_agent.terminal import LocalBackend, TerminalBackend
 
@@ -89,9 +90,8 @@ def make_coding_agent(
 
     return Agent(
         name="编程Agent",
-        model=DeepSeekChat(
-            id="deepseek-chat",
-            base_url="https://api.deepseek.com",
+        model=OpenAICompatChat(
+            id=LLM_MODEL,
             logger=logger,
         ),
         tools=[send_command, list_files, read_file, write_file],

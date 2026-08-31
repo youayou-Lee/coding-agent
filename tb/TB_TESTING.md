@@ -9,7 +9,7 @@
 | tb CLI | `uv tool install terminal-bench --with agno`（--with agno 让 tb 环境能 import agno） |
 | Docker | 29.2.0，daemon 运行中 |
 | 任务集 | 官方：`/tmp/terminal-bench-1/original-tasks`（241 任务）；本地改造版：`/tmp/tb-tasks` |
-| API Key | `~/.zshrc` 的 DEEPSEEK_API_KEY（exec 需 source，见下文） |
+| API Key / 模型 | 项目根 `.env`：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL（当前 GLM glm-5.3-flash，OpenAI 兼容协议） |
 | PYTHONPATH | 必须指向 lab 根（adapter 可导入） |
 
 ## 1. 网络适配（本机关键，缺一不可）
@@ -40,14 +40,14 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u al
 
 ## 3. 评测我们的 Coding Agent
 
+用项目根的 `tb_run.sh`（自动 unset 代理 + 加载 .env + 设 PYTHONPATH）：
+
 ```bash
-cd /home/you/.openclaw/workspace-superbrain/sandbox/minimal-agent-lab
-source /tmp/dsk.env    # 加载 DEEPSEEK_API_KEY（从 ~/.zshrc 提取，仅本机）
-export PYTHONPATH=/home/you/.openclaw/workspace-superbrain/sandbox/minimal-agent-lab
+cd ~/cs/proj/coding-agent
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
-  tb run \
-    --agent-import-path course.coding_agent.tb_adapter:CodingAgentTB \
-    --dataset-path /tmp/tb-tasks \
+  ./tb_run.sh run \
+    --agent-import-path coding_agent.tb_adapter:CodingAgentTB \
+    --dataset-path tb/tasks \
     --task-id analyze-access-logs
 ```
 多任务：`--n-tasks 5` 或 `--task-id <glob> --task-id <glob2>`（task-id 支持多次）。
@@ -86,7 +86,7 @@ runs/<时间戳>/
 | `Failed to import agent` | PYTHONPATH 没设 / tb 环境缺 agno | export PYTHONPATH；确认 `uv tool install terminal-bench --with agno` |
 | 镜像构建慢/卡 | Dockerfile 里有联网 RUN | 保持 Dockerfile 只 COPY，依赖挪到测试阶段 |
 | `No module named pytest` | run-tests.sh 没装成功 | 确认 pip 源可用（阿里云镜像直连 200） |
-| DeepSeek 调用失败 | key 没加载 | `source /tmp/dsk.env` 或 `export DEEPSEEK_API_KEY=*** -n 's/.*DEEPSEEK_API_KEY="\([^"]*\)".*/\1/p' ~/.zshrc)` |
+| 模型调用失败 | key 没加载 | 检查项目根 `.env` 是否存在且含 LLM_API_KEY；或 shell 里直接 `export LLM_API_KEY=...`（优先生效） |
 
 ## 6. 本机网络事实（为什么这么适配）
 
