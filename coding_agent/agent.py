@@ -10,9 +10,10 @@ from pathlib import Path
 from agno.agent import Agent
 from agno.tools.decorator import tool
 
-from coding_agent.agno_compat import OpenAICompatChat
+from coding_agent.agno_compat import OpenAICompatChat, ProviderChat
 from coding_agent.config import LLM_MODEL
 from coding_agent.logging_util import RunLogger
+from coding_agent.provider import ProviderChain, load_providers
 from coding_agent.terminal import LocalBackend, TerminalBackend
 
 
@@ -88,12 +89,19 @@ def make_coding_agent(
         logger.tool_call("write_file", {"path": path}, result, ok=not result.startswith("(错误"), step=0)
         return result
 
-    return Agent(
-        name="编程Agent",
-        model=OpenAICompatChat(
+    providers = load_providers()
+    if len(providers) == 1:
+        model = OpenAICompatChat(
             id=LLM_MODEL,
             logger=logger,
-        ),
+        )
+    else:
+        # 多 provider：链式故障切换（重试 + failover）
+        model = ProviderChat(ProviderChain(providers), logger=logger)
+
+    return Agent(
+        name="编程Agent",
+        model=model,
         tools=[send_command, list_files, read_file, write_file],
         instructions=SYSTEM_INSTRUCTIONS,
         tool_call_limit=max_steps,

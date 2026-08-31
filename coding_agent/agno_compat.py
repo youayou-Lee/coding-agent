@@ -17,6 +17,7 @@ the hard way:
 """
 
 import httpx
+from agno.models.base import Model
 
 from coding_agent import config as _cfg
 from agno.models.openai import OpenAIChat
@@ -51,7 +52,6 @@ class OpenAICompatChat(OpenAIChat):
             content = getattr(resp, "content", None) or ""
             logger.llm_response(str(content)[:500])
         return resp
-
     def __deepcopy__(self, memo):
         import copy as _copy
 
@@ -72,3 +72,90 @@ class OpenAICompatChat(OpenAIChat):
 
 
 DeepSeekChat = OpenAICompatChat  # backward-compat alias
+
+
+class ProviderChat(OpenAICompatChat):
+    """多 provider 故障切换包装器。
+
+    设计：继承 OpenAICompatChat（复用全部协议实现），只覆写两个单点：
+      - get_client(): 返回链当前 provider 的 OpenAI client
+      - get_request_params(): 同步当前 provider 的 model / thinking 参数
+
+    Agno 的 invoke() 每次调用 get_client() 发请求 → 链的游标决定实际谁接单。
+    故障切换 = chain.execute() 内部移动游标，下次请求自动用新 provider。
+
+    覆写 invoke()（非流式路径）把调用包进 ProviderChain：
+      - 瞬时故障（500/429/超时）→ 同 provider 退避重试
+      - 持续/配置故障 → 切下一个 provider（本次 run 内记住）
+      - 全挂 → 原样抛最后一个异常
+    """
+
+    def __init__(self, chain, *, logger=None):
+        head = chain.current
+        super().__init__(
+            id=head.model,
+            base_url=head.base_url,
+            api_key=head.api_key,
+            extra_body=(
+                {"thinking": {"type": "enabled", "thinking_budget": head.thinking}}
+                if head.thinking
+                else None
+            ),
+        )
+        self._chain = chain
+        self._logger = logger
+        # 同 provider 复用已建 client（Agno get_client 本身有缓存，
+        # 但换 provider 后 self.client 缓存的是旧家的，必须失效）
+        self._client_cache: dict[str, OpenAICompatChat] = {}
+
+    def _active_client(self):
+        cfg = self._chain.current
+        if cfg.name not in self._client_cache:
+            kwargs = {
+                "id": cfg.model,
+                "base_url": cfg.base_url,
+                "api_key": cfg.api_key,
+            }
+            if cfg.thinking:
+                kwargs["extra_body"] = {"thinking": {"type": "enabled", "thinking_budget": cfg.thinking}}
+            self._client_cache[cfg.name] = OpenAICompatChat(**kwargs)
+        return self._client_cache[cfg.name]
+
+    def get_client(self):
+        return self._active_client().get_client()
+
+    def invoke(self, messages, assistant_message, **kwargs):
+        cfg = self._chain.current
+
+        def attempt(active_cfg):
+            if self._logger is not None:
+                self._logger.event("provider_attempt", provider=active_cfg.name, model=active_cfg.model)
+            # Agno invoke 里 model=self.id 是闭包读取【执行时】的 self.id，
+            # 临时指向当前 provider 的 model，请求结束后还原（避免残留状态）
+            original_id = self.id
+            try:
+                self.id = active_cfg.model
+                return super(ProviderChat, self).invoke(messages, assistant_message, **kwargs)
+            finally:
+                self.id = original_id
+
+        return self._chain.execute(attempt, on_event=(
+            (lambda e, d: self._logger.event(e, detail=d)) if self._logger is not None else None
+        ))
+
+    def __deepcopy__(self, memo):
+        # 链状态（游标）与 client 缓存不可深拷贝：共享引用即可
+        # （与 OpenAICompatChat.__deepcopy__ 同思路）
+        import copy as _copy
+
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            if key in ("_chain", "_client_cache", "_logger"):
+                setattr(new, key, value)  # 共享
+                continue
+            try:
+                setattr(new, key, _copy.deepcopy(value, memo))
+            except Exception:
+                setattr(new, key, value)
+        return new
