@@ -36,6 +36,20 @@ def load_env(path: Path | None = None) -> dict[str, str]:
 
 load_env()
 
+# 思考控制：glm-5.3-flash 是"始终思考"模型，不支持 disabled，只支持 low/high/max
+# （API error 1210 实测确认）。thinking_budget 需套在 {"type": "enabled"} 里。
+_thinking = os.environ.get("LLM_THINKING", "low").strip()
+
+
+def thinking_extra_body() -> dict | None:
+    """把 LLM_THINKING 转成智谱 API 的 thinking 参数；空值表示不传。"""
+    if not _thinking:
+        return None
+    if _thinking == "disabled":
+        return {"thinking": {"type": "disabled"}}  # 仅支持关闭思考的 GLM 模型可用
+    return {"thinking": {"type": "enabled", "thinking_budget": _thinking}}
+
+
 # 兼容旧变量名：LLM_API_KEY > GLM_API_KEY > DEEPSEEK_API_KEY
 LLM_API_KEY = (
     os.environ.get("LLM_API_KEY")

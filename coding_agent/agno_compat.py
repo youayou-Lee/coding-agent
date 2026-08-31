@@ -36,6 +36,9 @@ class OpenAICompatChat(OpenAIChat):
         kwargs.setdefault("api_key", _cfg.LLM_API_KEY)
         kwargs.setdefault("base_url", _cfg.LLM_BASE_URL)
         kwargs.setdefault("id", _cfg.LLM_MODEL)
+        thinking = _cfg.thinking_extra_body()
+        if thinking:
+            kwargs.setdefault("extra_body", thinking)
         self._logger = kwargs.pop("logger", None)
         super().__init__(*args, **kwargs)
 
