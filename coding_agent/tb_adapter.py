@@ -28,7 +28,7 @@ class CodingAgentTB(BaseAgent):
     ) -> AgentResult:
         log_dir = Path(logging_dir) if logging_dir else Path("/tmp/coding_agent_logs")
         logger = RunLogger(log_dir)
-        backend = TmuxBackend(session)
+        backend = TmuxBackend(session, logger=logger)
         agent = make_coding_agent(backend, logger, workdir=Path("/app"))
 
         logger.event("task_start", instruction_preview=instruction[:200])
