@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Run unit tests
+        env:
+          LLM_API_KEY: dummy   # 测试不碰真实 API；config.load_env 需要 key 存在
+        run: uv run python -m unittest discover -s coding_agent -p "test_*.py" -v
