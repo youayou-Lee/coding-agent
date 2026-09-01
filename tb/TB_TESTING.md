@@ -100,6 +100,7 @@ runs/<时间戳>/
 ## 7. C1 任务集（2026-08-31）
 
 来源：`tb datasets download --dataset terminal-bench-core==0.1.1`（持久化 `tb/datasets/`，不再放 /tmp）。
+> 数据集不入 git（36MB）：换机/丢失后重新执行上面下载命令即可（需 `env -u http_proxy ... tb datasets download ...`）
 改造版在 `tb/tasks/`，oracle 全过（6/6）：
 
 | 任务 | 类型 | 改造要点 |
