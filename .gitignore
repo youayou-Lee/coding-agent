@@ -7,3 +7,5 @@ test/
 
 # Obsidian editor config (local tool, not project content)
 .obsidian/
+# Official TB dataset (36MB, re-downloadable: tb datasets download --dataset terminal-bench-core==0.1.1)
+tb/datasets/
