@@ -47,11 +47,12 @@ class FakeContainer:
         self.calls.append(cmd_str)
         if self._behave is not None:
             return self._behave(cmd_str)
-        # 生产真实形状：外层 exit 恒 0（printf 是外层最后命令），标记进 stdout
+        # 生产真实形状（内层 PWD 在前、外层 EXIT 在后，与 _build_wrapped 顺序一致）：
+        # 外层 exit 恒 0（外层最后命令是 printf EXIT），标记进 stdout
         stdout = (
             self._stdout
-            + f"{M}{self.inner_code}\n"
             + f"{P}{self._pwd}\n"
+            + f"{M}{self.inner_code}\n"
         )
         return _ExecResult(0, (stdout.encode(), self._stderr.encode()))
 
@@ -142,10 +143,11 @@ class CwdPersistenceTest(unittest.TestCase):
     """验收 #3：cwd 跨命令持久，由 shell 回报的 PWD 标记驱动（I1 根治）。"""
 
     def test_cwd_tracked_from_pwd_marker(self):
-        # cd - / cd X && cmd / 空格路径全部由 shell 自己回报，Python 不猜
+        # PWD 标记由【内层】shell 回报（内层 cd 可见）——CC 三轮 C-NEW-1 修复
         c = FakeContainer(stdout="", pwd="/app/src")
-        _make(c).run("cd /app/src && make")
-        self.assertEqual(c._calls_pwd(), None)  # placeholder 占位（见下）
+        backend = _make(c)
+        backend.run("cd /app/src && make")
+        self.assertEqual(backend._cwd, "/app/src")
 
     def test_cwd_tracked_after_cd_dash(self):
         """I1-2 回归：cd - 不再毒化 _cwd（shell 回报真实落点）。"""
@@ -168,6 +170,26 @@ class CwdPersistenceTest(unittest.TestCase):
         backend = _make(c)
         backend.run("cd '/app/my dir'")
         self.assertEqual(backend._cwd, "/app/my dir")
+
+    def test_cd_failure_keeps_old_cwd(self):
+        """cd 失败：内层非零退出、无 PWD 行 → real_cwd=None → 保留旧 _cwd。"""
+
+        class _CdFail:
+            def __init__(self):
+                self.calls = []
+
+            def exec_run(self, cmd, workdir=None, demux=True):
+                self.calls.append(" ".join(cmd))
+                # cd 失败：内层 bash 非零退出且无 PWD 行，外层照印 EXIT:1
+                return _ExecResult(0, (f"{M}1\n".encode(), b"cd: /nope: No such file or directory\n"))
+
+        c = _CdFail()
+        backend = _make(c)
+        backend._cwd = "/app"
+        with self.assertRaises(ToolExecutionError) as ctx:
+            backend.run("ls")
+        self.assertEqual(ctx.exception.exit_code, 1)
+        self.assertEqual(backend._cwd, "/app")  # 旧 cwd 保留
 
     def test_second_command_restores_cwd(self):
         """持久性闭环：第二条命令的 wrapped 里应显式 cd 回上次落点。"""

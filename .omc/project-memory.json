@@ -98,6 +98,12 @@
       "type": "file"
     },
     {
+      "path": "coding_agent/terminal.py",
+      "accessCount": 2,
+      "lastAccessed": 1788632601716,
+      "type": "file"
+    },
+    {
       "path": "coding_agent/agent.py",
       "accessCount": 1,
       "lastAccessed": 1788625286425,
@@ -107,12 +113,6 @@
       "path": "coding_agent/errors.py",
       "accessCount": 1,
       "lastAccessed": 1788625286470,
-      "type": "file"
-    },
-    {
-      "path": "coding_agent/terminal.py",
-      "accessCount": 1,
-      "lastAccessed": 1788625286489,
       "type": "file"
     },
     {

@@ -128,15 +128,24 @@ class TmuxBackend:
         self._cwd: str | None = None  # None = 容器默认目录（首次执行时探测）
 
     def _build_wrapped(self, command: str, timeout: int) -> str:
-        """把用户命令包进：cd 恢复 + timeout 包裹 + 退出码标记行 + PWD 标记行。"""
+        """把用户命令包进：cd 恢复 + timeout 包裹 + 内层 PWD 标记 + 外层退出码标记。
+
+        标记层次（CC 三轮审核 C-NEW-1 教训，docker 实测验证）：
+        - PWD 标记必须在【内层】bash 里发出——用户 cd 发生在内层子进程，
+          外层 $PWD 恒为容器默认目录，外层打 PWD 会永远回报错误 cwd
+        - EXIT 标记在外层：ec=$? 捕获 timeout/bash 的最终退出码（含 124）
+        - cd 失败时内层非零退出、无 PWD 行 → real_cwd=None → 保留旧 _cwd
+        """
         import shlex
 
         cd_part = f"cd {shlex.quote(self._cwd)} && " if self._cwd else ""
-        inner = f"{cd_part}{{ {command}; }}"
+        inner = (
+            f"{cd_part}{{ {{ {command}; }} }}; __ec=$?; "
+            f'printf \'%s%s\\n\' \'{self._PWD_MARKER}\' "$PWD"; exit $__ec;'
+        )
         return (
             f"timeout {timeout}s bash -c {shlex.quote(inner)}; "
-            f"ec=$?; printf '%s%s\\n' '{self._EXIT_MARKER}' \"$ec\"; "
-            f"printf '%s%s\\n' '{self._PWD_MARKER}' \"$PWD\""
+            f"ec=$?; printf '%s%s\\n' '{self._EXIT_MARKER}' \"$ec\""
         )
 
     @staticmethod
@@ -150,14 +159,15 @@ class TmuxBackend:
         pwd: str | None = None
         exit_code: int | None = None
 
-        if lines and lines[-1].startswith(TmuxBackend._PWD_MARKER):
-            pwd = lines.pop().removeprefix(TmuxBackend._PWD_MARKER).strip() or None
+        # 末尾顺序固定：内层 PWD 在前、外层 EXIT 在后（见 _build_wrapped 注释）
         if lines and lines[-1].startswith(TmuxBackend._EXIT_MARKER):
             raw = lines.pop().removeprefix(TmuxBackend._EXIT_MARKER).strip()
             try:
                 exit_code = int(raw)
             except ValueError:
                 exit_code = None
+        if lines and lines[-1].startswith(TmuxBackend._PWD_MARKER):
+            pwd = lines.pop().removeprefix(TmuxBackend._PWD_MARKER).strip() or None
         # 清除输出中任何疑似标记的行（防命令故意 echo 标记污染解析）
         lines = [
             ln
@@ -185,21 +195,20 @@ class TmuxBackend:
         net, exit_code, real_cwd = self._split_tail_markers(stdout)
 
         if exit_code is None:
-            # stdout 无标记行（docker 实测：printf 是外层最后命令，外层 exit 恒 0，
-            # 标记必然进 stdout 末行；缺标记 = cd 失败/timeout 杀 bash/异常截断）。
-            # 此时唯一的结构化事实是外层退出码。
+            # stdout 无标记行 = 输出异常截断/容器异常（生产中 EXIT 标记必达：
+            # docker 实测 timeout 杀内层、cd 失败两种场景标记均照印）。
+            # 本分支是纯异常兜底。
             code = result.exit_code
             if code == 124:
                 raise ToolExecutionError(
-                    f"命令超时（>{timeout}s）", exit_code=124, stderr=net or stderr
+                    f"命令超时（>{timeout}s，外层被杀）", exit_code=124, stderr=stderr or net
                 )
             if code == 0:
-                # 标记丢失但外层退出码 0：如实按成功处理（不应制造假错误）
                 return net or "(exit code 0, no output)"
             raise ToolExecutionError(
-                f"cd 到 {self._cwd} 失败或标记丢失（exit {code}）",
+                f"标记丢失（exit {code}，疑似输出截断）",
                 exit_code=code,
-                stderr=net or stderr,
+                stderr=stderr or net,
             )
 
         if exit_code == 124:
