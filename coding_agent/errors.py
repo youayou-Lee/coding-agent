@@ -60,11 +60,11 @@ _MESSAGE_RULES: list[tuple[str, ToolErrorType, str]] = [
     # -- transient：资源/时序类，重试有意义 --
     (r"\btimeout\b|timed?\s*out|超时", ToolErrorType.TRANSIENT, "msg:timeout"),
     (r"connection\s*(refused|reset|timed?\s*out)|连接(被)?(拒绝|重置|超时)", ToolErrorType.TRANSIENT, "msg:connection"),
-    (r"\b(locked|lock\s*wait|busy)\b|锁|被占用", ToolErrorType.TRANSIENT, "msg:lock"),
-    (r"temporar(y|ily)|临时|稍后重试|too\s*many\s*(requests|connections)|429|rate\s*limit", ToolErrorType.TRANSIENT, "msg:temporary"),
+    (r"\b(locked|lock\s*wait|busy)\b|文件被锁|文件已被锁定", ToolErrorType.TRANSIENT, "msg:lock"),
+    (r"temporar(y|ily)|临时|稍后重试|too\s*many\s*(requests|connections)|\b429\b|rate\s*limit", ToolErrorType.TRANSIENT, "msg:temporary"),
     (r"resource\s*temporarily\s*unavailable|资源暂不可用", ToolErrorType.TRANSIENT, "msg:resource"),
     # -- permanent：事实/资格类，重试无意义 --
-    (r"no\s*such\s*file|not\s*found|没有那个文件|不存在|无法找到", ToolErrorType.PERMANENT, "msg:not-found"),
+    (r"no\s*such\s*file|not\s*found|没有那个文件|不存在|无法找到|cannot\s*stat", ToolErrorType.PERMANENT, "msg:not-found"),
     (r"permission\s*denied|权限(拒绝|不够)|access\s*denied|不允许的操作", ToolErrorType.PERMANENT, "msg:permission"),
     (r"syntax\s*error|语法错误|parse\s*error|解析失败", ToolErrorType.PERMANENT, "msg:syntax"),
     (r"command\s*not\s*found|无法将.*识别|不是内部或外部命令", ToolErrorType.PERMANENT, "msg:cmd-not-found"),
