@@ -6,10 +6,10 @@ FakeContainer 忠实模拟 docker exec 的**执行语义**（C2 教训：形状+
 - PWD 标记行进 stdout（cwd 由 shell 回报，I1 根治方案）
 - stderr 独立通道（C1 修复后 run 只对 stdout 解析标记）
 
-生产真实形状（docker 实测复核，2026-09-06）：
-  exec_run(["bash","-lc","{ cat /nope; }; ec=$?; printf EXIT; printf PWD"])
-  → ExitCode=0, stdout=b"...\n__CODING_AGENT_EXIT:1\n__CODING_AGENT_PWD:/xxx\n",
-    stderr=b"cat: /nope: No such file..."
+生产真实形状（docker 实测复核，2026-09-06，C-NEW-1 修复后）：
+  wrapped = timeout Ns bash -c 'cd ... && { { cmd; }; __ec=$?; printf PWD "$PWD"; exit $__ec; '; ec=$?; printf EXIT "$ec"
+  → ExitCode=0（外层恒 0），stdout="...\n__CODING_AGENT_PWD:/xxx\n__CODING_AGENT_EXIT:1\n"（PWD 在前 EXIT 在后），
+    stderr="cat: /nope: No such file..."（独立通道）
 """
 
 import unittest
@@ -199,13 +199,6 @@ class CwdPersistenceTest(unittest.TestCase):
         backend.run("make")
         self.assertIn("cd /app/src", c.calls[1])
 
-
-# 给 FakeContainer 补一个无副作用的占位（保持上面 placeholder 断言可运行）
-def _calls_pwd(self):
-    return None
-
-
-FakeContainer._calls_pwd = _calls_pwd
 
 
 if __name__ == "__main__":

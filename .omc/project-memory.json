@@ -92,15 +92,15 @@
   },
   "hotPaths": [
     {
-      "path": "docs/WORKFLOW.md",
-      "accessCount": 2,
-      "lastAccessed": 1788625522303,
+      "path": "coding_agent/terminal.py",
+      "accessCount": 3,
+      "lastAccessed": 1788633072969,
       "type": "file"
     },
     {
-      "path": "coding_agent/terminal.py",
+      "path": "docs/WORKFLOW.md",
       "accessCount": 2,
-      "lastAccessed": 1788632601716,
+      "lastAccessed": 1788625522303,
       "type": "file"
     },
     {
@@ -126,6 +126,12 @@
       "accessCount": 1,
       "lastAccessed": 1788625433820,
       "type": "directory"
+    },
+    {
+      "path": "coding_agent/test_tmux_exec.py",
+      "accessCount": 1,
+      "lastAccessed": 1788633078361,
+      "type": "file"
     }
   ],
   "userDirectives": []
