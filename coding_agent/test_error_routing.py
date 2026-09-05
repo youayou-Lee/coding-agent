@@ -76,6 +76,19 @@ class TransientRetryTest(unittest.TestCase):
         events = [e["event"] for e in logger.replay()]
         self.assertIn("tool_retry_exhausted", events)
 
+    def test_transient_exhaust_keeps_original_rule(self):
+        # C1 回归：重试耗尽后 trace 的 rule 应保持外层 transient 判定，不降级为 fallback
+        backend = FakeBackend([
+            ToolExecutionError("database is locked", exit_code=1, stderr="locked")
+        ] * 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = RunLogger(Path(tmp))
+            send = _get_send_command(backend, logger)
+            send("sqlite3 query")
+        exhausted = [e for e in logger.replay() if e["event"] == "tool_retry_exhausted"][0]
+        self.assertEqual(exhausted["rule"], "msg:lock")  # 保持 transient 判定
+        self.assertNotEqual(exhausted["rule"], "fallback:unknown")
+
 
 class PermanentTest(unittest.TestCase):
     def test_permanent_returns_changepath_without_retry(self):
@@ -96,7 +109,7 @@ class PermanentTest(unittest.TestCase):
 
 class SemanticTest(unittest.TestCase):
     def test_semantic_passthrough(self):
-        # 未知错误 → semantic → 原样透传（方案 A 兜底，模型判断）
+        # 未知错误 → semantic → 透传交模型判断（方案 A 兜底）
         backend = FakeBackend([
             ToolExecutionError("md5 mismatch: expected aaa got bbb", exit_code=3, stderr="")
         ])
@@ -109,6 +122,17 @@ class SemanticTest(unittest.TestCase):
         final = [e for e in logger.replay() if e["event"] == "tool_call"][-1]
         self.assertFalse(final["ok"])
         self.assertEqual(final["error_kind"], "semantic")
+
+    def test_semantic_passthrough_includes_stderr(self):
+        # I2 回归：semantic 透传必须含 stderr，否则模型信息量不足无法判断
+        backend = FakeBackend([
+            ToolExecutionError("命令退出码 3", exit_code=3, stderr="assertion failed: 1 != 2")
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = RunLogger(Path(tmp))
+            send = _get_send_command(backend, logger)
+            result = send("pytest tests/")
+        self.assertIn("assertion failed", result)  # stderr 内容透传给了模型
 
 
 if __name__ == "__main__":

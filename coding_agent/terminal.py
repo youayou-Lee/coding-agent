@@ -56,16 +56,14 @@ class LocalBackend:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            # 超时：进程被杀，exit_code 用 124（timeout 专属码）喂给分类器
-            stderr = ""
-            if isinstance(exc.stderr, bytes):
-                stderr = exc.stderr.decode("utf-8", errors="replace")
-            elif exc.stderr:
-                stderr = exc.stderr
+            # 超时：进程被杀，exit_code 用 124（timeout 专属码）喂给分类器。
+            # 注意（审核 C2 修复）：capture_output=True 下超时时
+            # TimeoutExpired.stdout/stderr 恒为 None（Python 行为），
+            # 部分输出不可得，stderr 如实留空——不写误导性的 bytes 分支。
             raise ToolExecutionError(
                 f"命令超时（>{timeout}s）",
                 exit_code=124,
-                stderr=stderr,
+                stderr="",
             ) from exc
 
         if proc.returncode != 0:
