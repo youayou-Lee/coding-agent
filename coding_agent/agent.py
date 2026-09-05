@@ -18,6 +18,7 @@ from agno.tools.decorator import tool
 
 from coding_agent.agno_compat import OpenAICompatChat, ProviderChat
 from coding_agent.config import LLM_MODEL
+from coding_agent.error_budget import ErrorBudget
 from coding_agent.errors import ErrorKind, ToolErrorType, classify_error
 from coding_agent.logging_util import RunLogger
 from coding_agent.provider import ProviderChain, load_providers
@@ -37,12 +38,12 @@ RETRY_MAX = 2
 RETRY_BACKOFF_BASE = 1.0  # 1s → 2s
 
 
-def _format_changepath(kind: ErrorKind, err: ToolExecutionError) -> str:
+def _format_changepath(kind: ErrorKind, err: ToolExecutionError, *, budget_note: str = "") -> str:
     """permanent 错误的结构化回馈：告诉模型这是硬伤 + 给出换路建议。"""
     stderr = (err.stderr or "").strip()
     return (
         f"[命令失败，永久性错误] {err}\n"
-        f"分类：{kind.rule}（重试无效，请换方法）\n"
+        f"分类：{kind.rule}（重试无效，请换方法）{budget_note}\n"
         f"stderr: {stderr[:500] if stderr else '(无)'}"
     )
 
@@ -104,14 +105,20 @@ def make_coding_agent(
     max_steps: int = 20,
     workdir: Path | None = None,
     debug: bool = False,
+    budget_threshold: int = 3,
 ) -> Agent:
     workdir = workdir or Path.cwd()
+    budget = ErrorBudget(threshold=budget_threshold)  # 跨调用错误预算（#5）
 
     @tool
     def send_command(command: str) -> str:
         """在项目终端里执行一条 shell 命令并返回完整输出。参数 command: 要执行的命令。"""
         try:
             result = backend.run(command)
+            # 成功 = 环境恢复信号：销账（清空全部 transient 计数）
+            # 注：命令成功不代表所有环境问题消失，但作为销账信号足够简单可靠——
+            # 若错误真的还在，下一次失败会重新计数，最多多花一轮重试
+            budget.clear_all_transient()
             logger.tool_call(
                 "send_command", {"command": command}, result, ok=True, step=0
             )
@@ -119,7 +126,31 @@ def make_coding_agent(
         except ToolExecutionError as err:
             kind = classify_error(err, exit_code=err.exit_code, stderr=err.stderr)
             if kind.type is ToolErrorType.TRANSIENT:
+                # #5 错误预算：同类错误跨调用计数；超阈值升级为 permanent 处理
+                # （跳过自动重试，直接结构化回模型，防止 20 步预算烧在同一堵墙上）
+                count = budget.record(kind)
+                if budget.exhausted(kind):
+                    logger.event(
+                        "error_budget_exhausted",
+                        rule=kind.rule,
+                        count=count,
+                        threshold=budget.threshold,
+                        detail=str(err)[:200],
+                    )
+                    result = _format_changepath(
+                        kind, err,
+                        budget_note=f"【预算耗尽】同类错误已发生 {count} 次，本次跳过自动重试",
+                    )
+                    logger.tool_call(
+                        "send_command", {"command": command}, result,
+                        ok=False, step=0,
+                        error_kind=kind.type.value, rule=kind.rule,
+                        budget_exhausted=True,
+                    )
+                    return result
                 ok, result = _retry_with_backoff(backend, command, err, logger, kind)
+                if ok:
+                    budget.clear(kind)  # 成功 = 环境恢复信号，销账
                 logger.tool_call(
                     "send_command", {"command": command}, result,
                     ok=ok, step=0,
