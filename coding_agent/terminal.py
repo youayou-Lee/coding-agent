@@ -1,12 +1,12 @@
 """coding_agent v0.1: TerminalBackend abstraction.
 
 LocalBackend: subprocess in a workdir — fast, cheap, for development.
-TmuxBackend: terminal-bench's TmuxSession inside the Docker sandbox —
-for evaluation. The agent never knows which backend it talks to.
+TmuxBackend: docker exec inside terminal-bench's sandbox — for evaluation.
+The agent never knows which backend it talks to.
 
-失败上报约定（v0.5 #4）：成功返回字符串，失败抛 ToolExecutionError。
-exit_code / stderr 原样带上，供 classify_error 的三层信号（异常类型 /
-exit_code / 消息模式）使用——不再把错误煮成一锅字符串。
+失败上报约定（v0.5 #4，两个 backend 均兑现）：成功返回字符串，失败抛
+ToolExecutionError。exit_code / stderr 原样带上，供 classify_error 的
+三层信号（异常类型 / exit_code / 消息模式）使用。
 """
 
 import subprocess
@@ -98,22 +98,113 @@ def wrap_multiline(command: str) -> tuple[str, bool]:
 
 
 class TmuxBackend:
-    """Adapter over terminal-bench's TmuxSession (Docker sandbox)."""
+    """在 terminal-bench 的 Docker 沙箱容器内执行命令（评测用）。
+
+    v0.5 方案 D（Issue #12，先生拍板）：不再用 tmux 敲键盘模拟人类操作，
+    改走 session.container.exec_run()（docker SDK）——
+    - 真实 exit_code（结构化，与 LocalBackend 契约完全对齐）
+    - stdout/stderr 分离
+    - 多行命令天然合法（bash -c），v0.4 的 base64 单行化补丁退役
+    - 容器内 timeout 包裹 → 超时 exit 124，与分类器规则天然对接
+
+    TB 评分不受影响：harness 在任务目录自己跑 pytest + parser，
+    与 agent 用什么通道执行命令无关；回放证据依赖 events.jsonl trace。
+
+    cwd 语义：exec 每次新进程，本 backend 维护 _cwd 状态，
+    每条命令显式 cd 恢复（对齐 tmux 的“shell 持续存活”语义）。
+    """
+
+    _EXIT_MARKER = "__CODING_AGENT_EXIT:"
 
     def __init__(self, session, *, logger=None) -> None:
         self._session = session
+        self._container = session.container
         self._logger = logger
+        self._cwd: str | None = None  # None = 容器默认目录（首次执行时探测）
+
+    def _build_wrapped(self, command: str, timeout: int) -> str:
+        """把用户命令包进：cd 恢复 + timeout 包裹 + 退出码标记行。"""
+        import shlex
+
+        cd_part = f"cd {shlex.quote(self._cwd)} && " if self._cwd else ""
+        inner = f"{cd_part}{{ {command}; }}"
+        return (
+            f"timeout {timeout}s bash -c {shlex.quote(inner)}; "
+            f"ec=$?; printf '%s%s\\n' '{self._EXIT_MARKER}' \"$ec\""
+        )
+
+    @staticmethod
+    def _split_marker(output: str) -> tuple[str, int | None, bool]:
+        """从输出末尾剥掉退出码标记行。返回 (净输出, 退出码, cd 是否失败)。"""
+        lines = output.rstrip("\n").split("\n")
+        exit_code = None
+        cd_failed = False
+        if lines and lines[-1].startswith(TmuxBackend._EXIT_MARKER):
+            raw = lines.pop().removeprefix(TmuxBackend._EXIT_MARKER).strip()
+            try:
+                exit_code = int(raw)
+            except ValueError:
+                exit_code = None
+            lines = [ln for ln in lines if not ln.startswith(TmuxBackend._EXIT_MARKER)]
+        else:
+            # 无标记行：timeout 杀掉 bash（exit 124/137）或 cd 失败，命令体未产出
+            cd_failed = True
+        net = "\n".join(lines).strip()
+        return net, exit_code, cd_failed
 
     def run(self, command: str, *, timeout: int = 60) -> str:
-        wrapped, was_wrapped = wrap_multiline(command)
-        if was_wrapped and self._logger is not None:
-            self._logger.event("multi_line_wrapped", original_preview=command[:200])
-        self._session.send_keys(
-            keys=[wrapped, "Enter"],
-            block=True,
-            max_timeout_sec=timeout,
-        )
+        wrapped = self._build_wrapped(command, timeout)
         try:
-            return self._session.get_incremental_output()
-        except Exception as exc:  # pragma: no cover
-            return f"(tmux read error: {exc})"
+            result = self._container.exec_run(
+                ["bash", "-lc", wrapped], workdir=None, demux=True
+            )
+        except Exception as exc:  # 容器/连接层故障（非命令失败）
+            raise ToolExecutionError(
+                f"docker exec 故障: {exc}", exit_code=None, stderr=str(exc)
+            ) from exc
+
+        stdout = (result.output[0] or b"").decode("utf-8", errors="replace") if result.output else ""
+        stderr = (result.output[1] or b"").decode("utf-8", errors="replace") if result.output else ""
+        combined = stdout + ("\n" + stderr if stderr.strip() else "")
+        net, exit_code, no_marker = self._split_marker(combined)
+
+        if exit_code is None:
+            # 无标记行：三种可能——(1) cd 失败 (2) timeout 杀掉 bash (3) 输出异常截断。
+            # 此时唯一的结构化事实是 bash -lc 自身的退出码。
+            code = result.exit_code
+            if code == 124:
+                raise ToolExecutionError(
+                    f"命令超时（>{timeout}s）", exit_code=124, stderr=net or stderr
+                )
+            if code == 0:
+                # 标记丢失但退出码为 0：如实按成功处理（不应制造假错误），净输出即全部所得
+                return net or "(exit code 0, no output)"
+            raise ToolExecutionError(
+                f"cd 到 {self._cwd} 失败或标记丢失（exit {code}）",
+                exit_code=code,
+                stderr=net or stderr,
+            )
+
+        if exit_code == 124:
+            raise ToolExecutionError(f"命令超时（>{timeout}s）", exit_code=124, stderr=net)
+        if exit_code != 0:
+            raise ToolExecutionError(
+                f"命令退出码 {exit_code}", exit_code=exit_code, stderr=stderr or net
+            )
+
+        # 成功：跟踪 cd 语义（用户命令里改了目录就记住）
+        if command.startswith("cd "):
+            import re
+
+            m = re.match(r"cd\s+(\S+)", command)
+            if m:
+                target = m.group(1).strip("'\"")
+                if target.startswith("/"):
+                    self._cwd = target
+                elif self._cwd:
+                    import posixpath
+
+                    self._cwd = posixpath.normpath(posixpath.join(self._cwd, target))
+                else:
+                    self._cwd = target  # 首条命令就 cd：以容器默认为基准，近似处理
+        return net or f"(exit code 0, no output)"

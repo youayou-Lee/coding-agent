@@ -79,6 +79,30 @@ class PriorityTest(unittest.TestCase):
         self.assertIs(kind.type, ToolErrorType.SEMANTIC)
 
 
+class MessageBoundaryTest(unittest.TestCase):
+    """I-2/I-3/M-4 回归：正则边界收紧后，误匹配源必须按正确语义分类。"""
+
+    def test_port_in_use_chinese_is_permanent(self):
+        # 曾被裸"被占用"抢先命中 transient（中英同义不同判）
+        self.assertIs(classify_error("端口已被占用").type, ToolErrorType.PERMANENT)
+
+    def test_deadlock_is_not_transient(self):
+        # 曾被裸"锁"命中 transient；死锁重试无意义
+        self.assertIs(classify_error("线程死锁，无法继续").type, ToolErrorType.SEMANTIC)
+
+    def test_429_in_path_is_not_transient(self):
+        # 曾被裸 429 命中 transient
+        kind = classify_error("cannot stat /data/4290.csv", exit_code=1)
+        self.assertIs(kind.type, ToolErrorType.PERMANENT)  # exit 1 + not found 文本
+
+    def test_real_429_still_transient(self):
+        kind = classify_error("HTTP 429 too many requests")
+        self.assertIs(kind.type, ToolErrorType.TRANSIENT)
+
+    def test_file_locked_still_transient(self):
+        self.assertIs(classify_error("文件被锁，请稍后重试").type, ToolErrorType.TRANSIENT)
+
+
 class ErrorKindContractTest(unittest.TestCase):
     def test_error_kind_is_frozen(self):
         kind = classify_error("anything")
