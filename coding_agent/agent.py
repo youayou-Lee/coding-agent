@@ -39,10 +39,11 @@ RETRY_BACKOFF_BASE = 1.0  # 1s → 2s
 
 def _format_changepath(kind: ErrorKind, err: ToolExecutionError) -> str:
     """permanent 错误的结构化回馈：告诉模型这是硬伤 + 给出换路建议。"""
+    stderr = (err.stderr or "").strip()
     return (
         f"[命令失败，永久性错误] {err}\n"
         f"分类：{kind.rule}（重试无效，请换方法）\n"
-        f"stderr: {err.stderr[:500] if err.stderr else '(无)'}"
+        f"stderr: {stderr[:500] if stderr else '(无)'}"
     )
 
 
@@ -52,11 +53,16 @@ def _retry_with_backoff(
     err: ToolExecutionError,
     logger: RunLogger,
     kind: ErrorKind,
-) -> str:
+) -> tuple[bool, str]:
     """transient 错误：工具内部自动重试（指数退避），模型无感知。
 
     每次重试都记 tool_retry 事件，trace 可回放（#6 验收）。
-    返回：重试成功的结果，或重试耗尽后的结构化失败信息。
+    返回 (ok, result)。
+
+    注意（审核 C1 修复）：进入重试循环即已定性 transient，重试只关心
+    "这次是否又失败"，不再对重试错误二次三分类——否则 ToolExecutionError
+    不在异常类型表里，重试阶段会退化成只靠 exit_code/stderr 的信号，
+    耗尽后把主导 kind 覆盖成 fallback，导致 trace 依据失真。
     """
     logger.event(
         "tool_retry",
@@ -71,22 +77,24 @@ def _retry_with_backoff(
         try:
             result = backend.run(command)
             logger.event("tool_retry_ok", attempt=i + 1, command_preview=command[:200])
-            return result
+            return True, result
         except ToolExecutionError as retry_err:
-            rekind = classify_error(
-                retry_err, exit_code=retry_err.exit_code, stderr=retry_err.stderr
-            )
             logger.event(
                 "tool_retry_failed",
                 attempt=i + 1,
-                rule=rekind.rule,
                 detail=str(retry_err)[:200],
+                stderr=(retry_err.stderr or "")[:200],
             )
             err = retry_err
-            kind = rekind
-    # 重试耗尽：升级为结构化失败回馈（不再透传裸错误）
+    # 重试耗尽：结构化失败回馈（不再透传裸错误）。kind 保持外层 transient 判定
+    # 不失真，但文案需如实说明是"重试未愈"而非"永久性错误"。
     logger.event("tool_retry_exhausted", retry_max=RETRY_MAX, rule=kind.rule)
-    return _format_changepath(kind, err)
+    stderr = (err.stderr or "").strip()
+    return False, (
+        f"[命令失败，transient 重试耗尽] {err}\n"
+        f"分类：{kind.rule}（重试 {RETRY_MAX} 次未愈，建议换方法）\n"
+        f"stderr: {stderr[:500] if stderr else '(无)'}"
+    )
 
 
 def make_coding_agent(
@@ -111,10 +119,10 @@ def make_coding_agent(
         except ToolExecutionError as err:
             kind = classify_error(err, exit_code=err.exit_code, stderr=err.stderr)
             if kind.type is ToolErrorType.TRANSIENT:
-                result = _retry_with_backoff(backend, command, err, logger, kind)
+                ok, result = _retry_with_backoff(backend, command, err, logger, kind)
                 logger.tool_call(
                     "send_command", {"command": command}, result,
-                    ok=not result.startswith("[命令失败"), step=0,
+                    ok=ok, step=0,
                     error_kind=kind.type.value, rule=kind.rule,
                 )
                 return result
@@ -125,12 +133,14 @@ def make_coding_agent(
                     error_kind=kind.type.value, rule=kind.rule,
                 )
                 return result
-            # semantic：原样透传（模型才有能力判断结果对不对）
+            # semantic：透传给模型判断，但必须含 stderr（审核 I2 修复）——
+            # 否则模型只拿到"命令退出码 N"的异常外壳，没有足够信息判断结果对不对
+            passthrough = f"{err}\nstderr: {(err.stderr or '(无)')[:500]}"
             logger.tool_call(
-                "send_command", {"command": command}, str(err), ok=False, step=0,
+                "send_command", {"command": command}, passthrough, ok=False, step=0,
                 error_kind=kind.type.value, rule=kind.rule,
             )
-            return str(err)
+            return passthrough
 
     @tool
     def list_files(path: str = ".") -> str:

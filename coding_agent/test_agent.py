@@ -21,7 +21,6 @@ class LocalBackendTest(unittest.TestCase):
                 backend.run("ls /definitely_not_exist_7f3a")
             self.assertIsNotNone(ctx.exception.exit_code)
             self.assertFalse(ctx.exception.exit_code == 0)
-            self.assertEqual(ctx.exception.exit_code, 2)
             self.assertTrue(
                 "definitely_not_exist" in ctx.exception.stderr
                 or "没有那个文件" in ctx.exception.stderr

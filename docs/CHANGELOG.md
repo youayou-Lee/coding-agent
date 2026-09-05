@@ -4,7 +4,8 @@
 
 主 Issue #1，拆四个子任务：#3 分类器核心 → #4 策略路由 → #5 错误预算 → #6 收官。
 
-- **#3 ✅（2026-09-05，PR #8 → 4412494）**：`errors.py` ToolErrorType 三分类 + ErrorKind(frozen，结论+依据) + classify_error 纯函数；规则四层命中即停（异常类型 > exit_code 124/126/127 > 消息模式中英双语 > 兜底）；兕底=方案 A（先生拍板：未知归 semantic 透传，默认动作不造成伤害）；新增 17 项单测（总 32 全绿）；设计评论已留档 Issue #3
+- **#3 ✅（2026-09-05，PR #8 → 4412494）**：`errors.py` ToolErrorType 三分类 + ErrorKind(frozen，结论+依据) + classify_error 纯函数；规则四层命中即停（异常类型 > exit_code 124/126/127 > 消息模式中英双语 > 兜底）；兜底=方案 A（先生拍板：未知归 semantic 透传，默认动作不造成伤害）；新增 17 项单测（总 32 全绿）；设计评论已留档 Issue #3
+- **#4 ✅（2026-09-05，PR #9 → 38ed4af，后经独立审核修复 PR #11）**：`terminal.py` 新增 ToolExecutionError（携带 exit_code/stderr），退出码非零与超时(→124)均抛异常不再煮字符串；`agent.py` send_command 接住→classify_error 体检→路由（方案 A）：transient→_retry_with_backoff 指数退避重试、permanent→_format_changepath 换路建议、semantic→透传含 stderr；`logging_util.py` tool_call 收 **extra 治愈 ok 永真；L2 scripted 4 场景（FakeBackend）；全量 36 项绿。**独立审核（code-review-dispatch）抓出 2 Critical + 4 Important，已修：C1 重试循环二次分类降级信号、C2 超时 stderr 死代码、I1 ok 字符串前缀判成败、I2 semantic 透传缺 stderr、I4 硬编码退出码；I3（L2 模型回路）如实标注待补**
 
 > 本文件是 coding-agent 长期共建的正式迭代记录。每个迭代周期一条：目标、改动、证据（live 测试结果）、发现的问题、下一步。
 > 原则：**真实优先于好看**——失败照记，未验证的不写"已完成"。
