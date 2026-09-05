@@ -1,24 +1,47 @@
 # coding-agent
 
-一个基于 **Agno + OpenAI 兼容 LLM** 的真实编程 Agent（当前接入 GLM glm-5.3-flash，此前为 DeepSeek）：能在项目目录里自主探索、写代码、跑命令、看错误、修复，并通过 **Terminal-Bench**（pytest 机器判定）做评测。
+从零构建一个 Coding Agent 的学习项目。
 
-> 起源：个人 AI Agent 学习课程（A1–A7 自研最小 Agent 理解机制）之后，用框架实践的第一个真实应用。从 `minimal-agent-lab` 实验区迁出，长期建设。
+不是"做一个产品"，也不是"写一个工具"——是**把 Agent 应用的每一层机制亲手造一遍**：模型怎么接入、工具怎么执行、错误怎么处理、上下文怎么管理、行为怎么评测。造出来的东西是否优雅不重要，**每一层为什么这样设计、踩了什么坑、怎么验证它工作**才是这个项目的产出。
+
+## 为什么从零造
+
+AI 编程工具（Claude Code / OpenCode / Cursor Agent）已经很好用了。但"会用"和"理解"之间隔着一整层：为什么 Agent 循环要有硬边界？错误该重试还是该换路？上下文爆了怎么办？这些问题只有自己造一遍才能回答。
+
+本项目是《AI Agent 应用开发实践》课程的实践出口：课程实验区（A1–A8 自研最小 Agent + 框架对照）解决了"机制是什么"，这里解决"造出来会碰到什么"。
+
+## 学习主线（按时间序，每步一个主题）
+
+| 版本 | 主题 | 学到了什么 |
+|---|---|---|
+| v0.1–v0.3 | 起步：Agent 组装 + 评测链路 | Agno 组装、LLM 适配的坑（代理/role/深拷贝）、TB 接入、oracle 基线 |
+| v0.4 | 可靠性初探 | LLM 调用会偶发 500 → 重试+failover 部件；tmux 敲键盘的多行命令坑 → base64 单行化 |
+| v0.5（进行中） | 错误处理体系 | 工具失败三分法（transient/permanent/semantic）、事实与决策分离、TB 评测通道的契约对齐 |
+| 后续 | 见毕业标准 | 计划-执行分离、上下文预算、权限模式…… |
+
+每一步的完整决策记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md)（含失败、踩坑与修复过程，真实优先于好看）；工程流程规范见 [docs/WORKFLOW.md](docs/WORKFLOW.md)。
+
+## 毕业标准（训练场的出口）
+
+对齐主流终端 Coding Agent 的基本功能面（多轮会话、可靠性、计划执行、持久化、上下文压缩、文件工具、权限模式），并通过 Terminal-Bench 官方 80 题的量化达标线（方案 C：v0.5 后跑全量基线定分）。达标后项目转入下一阶段。
 
 ## 快速开始
 
 ```bash
-# 安装（uv 管理）
 cd ~/cs/proj/coding-agent
 uv sync
 
-# 交互模式（像 Claude Code 一样多轮迭代）
+# 交互模式（多轮迭代）
 uv run python -m coding_agent.cli --workdir /path/to/你的项目
 
 # 一次性任务
 uv run python -m coding_agent.cli --workdir /path/to/你的项目 --task "写一个脚本…并运行验证"
+
+# 跑测试
+uv run python -m unittest discover -s coding_agent -p 'test_*.py' -v
 ```
 
-## 评测（Terminal-Bench）
+## 评测
 
 ```bash
 # 链路验证（oracle，不需要 LLM/API）
@@ -26,54 +49,17 @@ uv run python -m coding_agent.cli --workdir /path/to/你的项目 --task "写一
 
 # 评测 Coding Agent（真实 LLM）
 ./tb_run.sh run --agent-import-path coding_agent.tb_adapter:CodingAgentTB \
-    --dataset-path tb/tasks --task-id analyze-access-logs
+    --dataset-path tb/tasks --n-tasks 6
 ```
 
-评测手册（含本机网络适配、结果解读、常见问题）：[tb/TB_TESTING.md](tb/TB_TESTING.md)
-
-## 项目结构
-
-```
-coding-agent/
-├── coding_agent/          # 核心包
-│   ├── agent.py           # make_coding_agent：Agno + 4 工具（send_command/list_files/read_file/write_file）
-│   ├── agno_compat.py     # OpenAICompatChat 适配器（role_map/trust_env/api_key/__deepcopy__/logger，全部踩坑收敛）
-│   ├── config.py          # .env 加载 + LLM_API_KEY/BASE_URL/MODEL（provider 无关）
-│   ├── terminal.py        # TerminalBackend 抽象：LocalBackend（本地）/ TmuxBackend（TB 沙箱）
-│   ├── logging_util.py    # RunLogger：JSONL 全量事件（llm_call/tool_call/llm_response）
-│   ├── cli.py             # 交互式 CLI（多轮迭代）
-│   ├── demo.py            # 本地演示任务（access_log 分析）
-│   ├── tb_adapter.py      # Terminal-Bench 接入（BaseAgent.perform_task）
-│   └── test_agent.py      # 4 项确定性测试
-├── tb/
-│   ├── TB_TESTING.md      # 评测手册
-│   └── tasks/             # 本机网络适配版任务集（官方任务需套用改造）
-├── tb_run.sh              # 评测套壳脚本（代理/key/PYTHONPATH 自动处理）
-├── runs/                  # 评测结果（results.json + agent 日志 + 终端录像）
-└── pyproject.toml         # uv 项目定义
-```
-
-## 设计要点
-
-- **后端抽象**：`LocalBackend`（本地 subprocess，开发用）与 `TmuxBackend`（TB Docker 沙箱，评测用）同接口——同一个 agent 代码两个环境直接切换。
-- **权限边界**：文件工具限制在工作目录内（路径越界即拒）；`send_command` 是裸 shell（本地模式建议在 git 仓库用）。
-- **日志系统**：每次运行落在 `<workdir>/.agent_logs/events.jsonl`；评测时额外写入 TB 的 `runs/<时间戳>/…/agent-logs/events.jsonl`。事件含 llm_call（请求）/tool_call（参数/结果/成败）/llm_response（最终），定位问题三步：failure_mode → events.jsonl → tests.log。
-- **模型适配收敛**：OpenAICompatChat 内置 trust_env=False（代理隔离）、api_key/base_url/model 从项目根 `.env` 读取（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL，provider 无关）、role_map（system 而非 developer）、__deepcopy__（MemoryManager 深拷贝丢 client 的坑）、logger 包装（LLM 调用进日志）。
-- **GLM 接入事实（2026-08-31）**：glm-5.3-flash 是思考型模型（reasoning_content + reasoning_tokens），OpenAI 兼容协议正常；max_tokens 过小时思考吃掉全部预算导致 content 为空，Agent 的 max_tokens 必须留足。
+评测手册（本机网络适配、结果解读、常见问题）：[tb/TB_TESTING.md](tb/TB_TESTING.md)
 
 ## 当前状态
 
-- ✅ 本地 CLI 可用（多轮迭代 + 一次性任务）
-- ✅ Terminal-Bench 链路打通：oracle 100%、CodingAgentTB 通过 `analyze-access-logs`（Accuracy 100%）
-- ✅ 日志系统完整（llm_call/tool_call/llm_response 事件序列）
-- ⏳ 待办：更多 TB 任务验证（`--n-tasks`）；write_file 在沙箱的路径解析问题（agent 已能绕过，但应修复）；Token 统计接入 AgentResult
+- v0.4 已发布：Provider 故障切换 + 多行命令修复，TB 6/6
+- v0.5 进行中：错误分类与恢复策略（分类器/路由已落地，TmuxBackend 通道重构审核整改中）
+- 全量测试 51 项绿；完整进度见 CHANGELOG 与 GitHub Milestones
 
-## 常用命令速查
+## 环境说明
 
-```bash
-uv run python -m coding_agent.cli --workdir <dir>            # 交互
-uv run python -m coding_agent.cli --workdir <dir> --task "…" # 一次性
-uv run python -m unittest discover -s coding_agent -p 'test_*.py' -v  # 测试
-./tb_run.sh run --agent oracle --dataset-path tb/tasks --task-id analyze-access-logs  # 链路自检
-asciinema play runs/<时间戳>/…/sessions/agent.cast           # 回放评测录像
-```
+本机（Ubuntu 24.04 / GLM via OpenAI 兼容协议）的网络适配细节——pypi/docker/ghcr 的镜像源、socks 代理处理——都收敛在 `tb_run.sh` 与 `tb/TB_TESTING.md`，不污染代码。
