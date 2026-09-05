@@ -84,6 +84,10 @@ import base64
 def wrap_multiline(command: str) -> tuple[str, bool]:
     """多行命令 base64 单行化（bug#1 修复，2026-08-31 解剖确认）。
 
+    .. deprecated:: v0.5 (Issue #12 方案 D)
+        TmuxBackend 已改走 container.exec_run（bash -c 多行天然合法），
+        本函数在生产路径不再被调用，仅保留供历史 trace 复现。
+
     机制：TB send-keys 把含换行的字符串逐行敲入，第一行立刻执行，
     shell 进入 PS2 续行状态，完成信号 "; tmux wait -S done" 被当作
     heredoc 正文吸进文件 → 完成通知永不到达 → 死等到超时。
@@ -115,6 +119,7 @@ class TmuxBackend:
     """
 
     _EXIT_MARKER = "__CODING_AGENT_EXIT:"
+    _PWD_MARKER = "__CODING_AGENT_PWD:"
 
     def __init__(self, session, *, logger=None) -> None:
         self._session = session
@@ -123,34 +128,44 @@ class TmuxBackend:
         self._cwd: str | None = None  # None = 容器默认目录（首次执行时探测）
 
     def _build_wrapped(self, command: str, timeout: int) -> str:
-        """把用户命令包进：cd 恢复 + timeout 包裹 + 退出码标记行。"""
+        """把用户命令包进：cd 恢复 + timeout 包裹 + 退出码标记行 + PWD 标记行。"""
         import shlex
 
         cd_part = f"cd {shlex.quote(self._cwd)} && " if self._cwd else ""
         inner = f"{cd_part}{{ {command}; }}"
         return (
             f"timeout {timeout}s bash -c {shlex.quote(inner)}; "
-            f"ec=$?; printf '%s%s\\n' '{self._EXIT_MARKER}' \"$ec\""
+            f"ec=$?; printf '%s%s\\n' '{self._EXIT_MARKER}' \"$ec\"; "
+            f"printf '%s%s\\n' '{self._PWD_MARKER}' \"$PWD\""
         )
 
     @staticmethod
-    def _split_marker(output: str) -> tuple[str, int | None, bool]:
-        """从输出末尾剥掉退出码标记行。返回 (净输出, 退出码, cd 是否失败)。"""
-        lines = output.rstrip("\n").split("\n")
-        exit_code = None
-        cd_failed = False
+    def _split_tail_markers(stdout: str) -> tuple[str, int | None, str | None]:
+        """从 stdout 末尾剥掉退出码 + PWD 两个标记行。
+
+        返回 (净输出, 退出码, 真实 cwd)。末尾顺序固定：EXIT 标记在前、PWD 在后；
+        逐个从末尾弹出，缺失则对应值为 None（调用方决定如何处理缺失）。
+        """
+        lines = stdout.rstrip("\n").split("\n")
+        pwd: str | None = None
+        exit_code: int | None = None
+
+        if lines and lines[-1].startswith(TmuxBackend._PWD_MARKER):
+            pwd = lines.pop().removeprefix(TmuxBackend._PWD_MARKER).strip() or None
         if lines and lines[-1].startswith(TmuxBackend._EXIT_MARKER):
             raw = lines.pop().removeprefix(TmuxBackend._EXIT_MARKER).strip()
             try:
                 exit_code = int(raw)
             except ValueError:
                 exit_code = None
-            lines = [ln for ln in lines if not ln.startswith(TmuxBackend._EXIT_MARKER)]
-        else:
-            # 无标记行：timeout 杀掉 bash（exit 124/137）或 cd 失败，命令体未产出
-            cd_failed = True
-        net = "\n".join(lines).strip()
-        return net, exit_code, cd_failed
+        # 清除输出中任何疑似标记的行（防命令故意 echo 标记污染解析）
+        lines = [
+            ln
+            for ln in lines
+            if not ln.startswith(TmuxBackend._EXIT_MARKER)
+            and not ln.startswith(TmuxBackend._PWD_MARKER)
+        ]
+        return "\n".join(lines).strip(), exit_code, pwd
 
     def run(self, command: str, *, timeout: int = 60) -> str:
         wrapped = self._build_wrapped(command, timeout)
@@ -165,19 +180,21 @@ class TmuxBackend:
 
         stdout = (result.output[0] or b"").decode("utf-8", errors="replace") if result.output else ""
         stderr = (result.output[1] or b"").decode("utf-8", errors="replace") if result.output else ""
-        combined = stdout + ("\n" + stderr if stderr.strip() else "")
-        net, exit_code, no_marker = self._split_marker(combined)
+        # C1 修复：标记解析只对 stdout。stderr 是独立的证据通道，永不混入——
+        # 否则 stderr 非空时末行不是标记，失败命令会被误判为“标记丢失”而吞成成功。
+        net, exit_code, real_cwd = self._split_tail_markers(stdout)
 
         if exit_code is None:
-            # 无标记行：三种可能——(1) cd 失败 (2) timeout 杀掉 bash (3) 输出异常截断。
-            # 此时唯一的结构化事实是 bash -lc 自身的退出码。
+            # stdout 无标记行（docker 实测：printf 是外层最后命令，外层 exit 恒 0，
+            # 标记必然进 stdout 末行；缺标记 = cd 失败/timeout 杀 bash/异常截断）。
+            # 此时唯一的结构化事实是外层退出码。
             code = result.exit_code
             if code == 124:
                 raise ToolExecutionError(
                     f"命令超时（>{timeout}s）", exit_code=124, stderr=net or stderr
                 )
             if code == 0:
-                # 标记丢失但退出码为 0：如实按成功处理（不应制造假错误），净输出即全部所得
+                # 标记丢失但外层退出码 0：如实按成功处理（不应制造假错误）
                 return net or "(exit code 0, no output)"
             raise ToolExecutionError(
                 f"cd 到 {self._cwd} 失败或标记丢失（exit {code}）",
@@ -192,19 +209,8 @@ class TmuxBackend:
                 f"命令退出码 {exit_code}", exit_code=exit_code, stderr=stderr or net
             )
 
-        # 成功：跟踪 cd 语义（用户命令里改了目录就记住）
-        if command.startswith("cd "):
-            import re
-
-            m = re.match(r"cd\s+(\S+)", command)
-            if m:
-                target = m.group(1).strip("'\"")
-                if target.startswith("/"):
-                    self._cwd = target
-                elif self._cwd:
-                    import posixpath
-
-                    self._cwd = posixpath.normpath(posixpath.join(self._cwd, target))
-                else:
-                    self._cwd = target  # 首条命令就 cd：以容器默认为基准，近似处理
-        return net or f"(exit code 0, no output)"
+        # 成功：跟踪 cd 语义。I1 根治：PWD 标记由 shell 回报真实 cwd，
+        # cd - / cd X && cmd / 空格路径全部正确（废除 Python 正则猜）。
+        if real_cwd and real_cwd.startswith("/"):
+            self._cwd = real_cwd
+        return net or "(exit code 0, no output)"

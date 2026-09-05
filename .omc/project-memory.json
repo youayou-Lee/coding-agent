@@ -1,0 +1,132 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1788625107727,
+  "projectRoot": "/home/you/cs/proj/coding-agent",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "test"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "coding_agent": {
+      "path": "coding_agent",
+      "purpose": null,
+      "fileCount": 16,
+      "lastAccessed": 1788625107722,
+      "keyFiles": [
+        "__init__.py",
+        "agent.py",
+        "agno_compat.py",
+        "cli.py",
+        "config.py"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1788625107723,
+      "keyFiles": [
+        "CHANGELOG.md",
+        "WORKFLOW.md"
+      ]
+    },
+    "runs": {
+      "path": "runs",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1788625107724,
+      "keyFiles": []
+    },
+    "tb": {
+      "path": "tb",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1788625107725,
+      "keyFiles": [
+        "TB_TESTING.md"
+      ]
+    },
+    "test": {
+      "path": "test",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1788625107725,
+      "keyFiles": [
+        "snake.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "docs/WORKFLOW.md",
+      "accessCount": 2,
+      "lastAccessed": 1788625522303,
+      "type": "file"
+    },
+    {
+      "path": "coding_agent/agent.py",
+      "accessCount": 1,
+      "lastAccessed": 1788625286425,
+      "type": "file"
+    },
+    {
+      "path": "coding_agent/errors.py",
+      "accessCount": 1,
+      "lastAccessed": 1788625286470,
+      "type": "file"
+    },
+    {
+      "path": "coding_agent/terminal.py",
+      "accessCount": 1,
+      "lastAccessed": 1788625286489,
+      "type": "file"
+    },
+    {
+      "path": "coding_agent/logging_util.py",
+      "accessCount": 1,
+      "lastAccessed": 1788625433786,
+      "type": "file"
+    },
+    {
+      "path": "coding_agent",
+      "accessCount": 1,
+      "lastAccessed": 1788625433820,
+      "type": "directory"
+    }
+  ],
+  "userDirectives": []
+}
