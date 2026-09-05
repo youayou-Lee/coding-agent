@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from coding_agent.logging_util import RunLogger
-from coding_agent.terminal import LocalBackend
+from coding_agent.terminal import LocalBackend, ToolExecutionError
 
 
 class LocalBackendTest(unittest.TestCase):
@@ -13,11 +13,19 @@ class LocalBackendTest(unittest.TestCase):
             out = backend.run("pwd && echo hello")
             self.assertIn("hello", out)
 
-    def test_captures_error_output(self) -> None:
+    def test_nonzero_exit_raises_tool_execution_error(self) -> None:
+        # v0.5 #4 新契约：退出码非零不再煮字符串，而是抛结构化异常
         with tempfile.TemporaryDirectory() as tmp:
             backend = LocalBackend(Path(tmp))
-            out = backend.run("ls /definitely_not_exist_7f3a")
-            self.assertTrue("definitely_not_exist" in out or "没有那个文件" in out)
+            with self.assertRaises(ToolExecutionError) as ctx:
+                backend.run("ls /definitely_not_exist_7f3a")
+            self.assertIsNotNone(ctx.exception.exit_code)
+            self.assertFalse(ctx.exception.exit_code == 0)
+            self.assertEqual(ctx.exception.exit_code, 2)
+            self.assertTrue(
+                "definitely_not_exist" in ctx.exception.stderr
+                or "没有那个文件" in ctx.exception.stderr
+            )
 
 
 class RunLoggerTest(unittest.TestCase):

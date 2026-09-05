@@ -37,10 +37,10 @@ class RunLogger:
     def llm_response(self, response_text: str, **extra) -> None:
         self.event("llm_response", response_preview=str(response_text)[:400], **extra)
 
-    def tool_call(self, tool: str, args: dict, result: str, *, ok: bool, step: int) -> None:
+    def tool_call(self, tool: str, args: dict, result: str, *, ok: bool, step: int, **extra) -> None:
         self.event(
             "tool_call", step=step, tool=tool, args=args,
-            ok=ok, result_preview=str(result)[:500],
+            ok=ok, result_preview=str(result)[:500], **extra,
         )
 
     def step_event(self, step: int, note: str) -> None:
