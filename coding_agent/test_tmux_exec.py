@@ -1,132 +1,204 @@
 """test_tmux_exec.py — TmuxBackend 方案 D（docker exec）的 L2 组件测试。
 
-FakeContainer 模拟 docker exec_run：按脚本返回 (exit_code, (stdout, stderr))，
-验证 TmuxBackend.run 的契约与 LocalBackend 完全对齐（成功返回/失败抛 ToolExecutionError）
-以及 cwd 持久性、124 超时映射、标记剥离。不碰真 Docker。
+FakeContainer 忠实模拟 docker exec 的**执行语义**（C2 教训：形状+语义两层保真）：
+- 外层脚本以 printf 收尾 → docker exec 的 exit_code 恒 0（除非外层被杀）
+- 内层命令的真实退出码经 EXIT 标记行进 stdout
+- PWD 标记行进 stdout（cwd 由 shell 回报，I1 根治方案）
+- stderr 独立通道（C1 修复后 run 只对 stdout 解析标记）
+
+生产真实形状（docker 实测复核，2026-09-06，C-NEW-1 修复后）：
+  wrapped = timeout Ns bash -c 'cd ... && { { cmd; }; __ec=$?; printf PWD "$PWD"; exit $__ec; '; ec=$?; printf EXIT "$ec"
+  → ExitCode=0（外层恒 0），stdout="...\n__CODING_AGENT_PWD:/xxx\n__CODING_AGENT_EXIT:1\n"（PWD 在前 EXIT 在后），
+    stderr="cat: /nope: No such file..."（独立通道）
 """
 
 import unittest
 
 from coding_agent.terminal import ToolExecutionError, TmuxBackend
 
-
-class FakeContainer:
-    """exec_run 按 script 弹出结果；记录每次调用收到的完整命令。"""
-
-    def __init__(self, script=None, *, behave=None):
-        self.script = list(script or [])
-        self.calls: list[str] = []
-        self.behave = behave  # 高级：函数(cmd_str) -> (exit_code, (out, err))
-
-    def exec_run(self, cmd, workdir=None, demux=True):
-        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-        self.calls.append(cmd_str)
-        if self.behave is not None:
-            return self.behave(cmd_str)  # 必须返回 _ExecResult（与真实 docker SDK 形状一致）
-        code, out = self.script.pop(0) if self.script else (0, (b"", b""))
-        return _ExecResult(code, out)
+M = TmuxBackend._EXIT_MARKER
+P = TmuxBackend._PWD_MARKER
 
 
 class _ExecResult:
-    """模拟 docker ExecResult（namedtuple 风格：exit_code + output）。"""
+    """与真实 docker ExecResult 形状一致：exit_code + output tuple。"""
 
-    def __init__(self, exit_code, output):
+    def __init__(self, exit_code: int, output):
         self.exit_code = exit_code
         self.output = output
 
 
-def _make_backend(script=None, *, behave=None):
-    container = FakeContainer(script, behave=behave)
+class FakeContainer:
+    """忠实模拟外层脚本语义：给定内层码/输出，构造生产真实形状的 ExecResult。
+
+    behave(inner_code, stdout_text, stderr_text) -> 额外覆写（如模拟外层被杀）。
+    """
+
+    def __init__(self, *, inner_code=0, stdout="", stderr="", pwd="/app", behave=None):
+        self.inner_code = inner_code
+        self._stdout = stdout
+        self._stderr = stderr
+        self._pwd = pwd
+        self._behave = behave
+        self.calls: list[str] = []
+
+    def exec_run(self, cmd, workdir=None, demux=True):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        self.calls.append(cmd_str)
+        if self._behave is not None:
+            return self._behave(cmd_str)
+        # 生产真实形状（内层 PWD 在前、外层 EXIT 在后，与 _build_wrapped 顺序一致）：
+        # 外层 exit 恒 0（外层最后命令是 printf EXIT），标记进 stdout
+        stdout = (
+            self._stdout
+            + f"{P}{self._pwd}\n"
+            + f"{M}{self.inner_code}\n"
+        )
+        return _ExecResult(0, (stdout.encode(), self._stderr.encode()))
+
+
+class _HangingContainer:
+    """模拟外层被 timeout 杀：无标记行 + 外层 exit 124。"""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def exec_run(self, cmd, workdir=None, demux=True):
+        self.calls.append(" ".join(cmd))
+        return _ExecResult(124, (b"partial output\n", b""))
+
+
+class _DockerErrorContainer:
+    """模拟容器/连接层故障。"""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def exec_run(self, cmd, workdir=None, demux=True):
+        self.calls.append(" ".join(cmd))
+        raise RuntimeError("container stopped")
+
+
+def _make(container):
     backend = TmuxBackend.__new__(TmuxBackend)  # 跳过 __init__（需要真 TmuxSession）
     backend._container = container
     backend._session = None
     backend._logger = None
     backend._cwd = None
-    return backend, container
-
-
-def _ok(stdout: bytes, stderr: bytes = b""):
-    return _ExecResult(0, (stdout, stderr))
-
-
-def _fail(code: int, stdout: bytes = b"", stderr: bytes = b""):
-    return _ExecResult(code, (stdout, stderr))
-
-
-M = TmuxBackend._EXIT_MARKER
+    return backend
 
 
 class ContractAlignmentTest(unittest.TestCase):
-    """验收：与 LocalBackend 契约完全一致——成功返回字符串，失败抛 ToolExecutionError。"""
+    """验收 #1：与 LocalBackend 契约完全一致。"""
 
-    def test_success_returns_clean_output_without_marker(self):
-        backend, container = _make_backend()
-        result = backend.run("ls")
-        self.assertNotIn(M, result)  # 标记行剥掉，模型不可见
-        # 内部命令带 timeout 包裹与退出码标记
-        self.assertIn("timeout 60s bash -c", container.calls[0])
-        self.assertIn(M, container.calls[0])
+    def test_success_returns_clean_output_without_markers(self):
+        c = FakeContainer(stdout="hello\n")
+        result = _make(c).run("ls")
+        self.assertIn("hello", result)
+        self.assertNotIn(M, result)  # 两个标记都对模型不可见
+        self.assertNotIn(P, result)
+        # 内部命令带 timeout 包裹与两个标记
+        self.assertIn("timeout 60s bash -c", c.calls[0])
+        self.assertIn(M, c.calls[0])
+        self.assertIn(P, c.calls[0])
 
-    def test_nonzero_exit_raises_tool_execution_error(self):
-        backend, _ = _make_backend(
-            behave=lambda cmd: _fail(2, b"", b"cat: x: No such file or directory")
+    def test_failure_with_stderr_raises_tool_execution_error(self):
+        """C1 回归（决定性用例）：stderr 非空的失败命令必须抛异常，不能吞成成功。"""
+        c = FakeContainer(
+            inner_code=2,
+            stdout="",
+            stderr="cat: x: No such file or directory\n",
         )
         with self.assertRaises(ToolExecutionError) as ctx:
-            backend.run("cat x")
+            _make(c).run("cat x")
         self.assertEqual(ctx.exception.exit_code, 2)
         self.assertIn("No such file", ctx.exception.stderr)
+        self.assertNotIn(M, ctx.exception.stderr)  # 标记不泄漏
+
+    def test_failure_without_stderr_still_raises(self):
+        c = FakeContainer(inner_code=1, stdout="", stderr="")
+        with self.assertRaises(ToolExecutionError) as ctx:
+            _make(c).run("false-ish cmd")
+        self.assertEqual(ctx.exception.exit_code, 1)
 
     def test_timeout_exit_124_maps_to_transient(self):
-        # 容器内 timeout 杀 bash：bash 自身 exit 124，无标记行
-        backend, _ = _make_backend(behave=lambda cmd: _ExecResult(124, (b"partial", b"")))
+        """验收 #2：外层被杀（无标记 + 外层 124）→ ToolExecutionError(124)。"""
+        c = _HangingContainer()
         with self.assertRaises(ToolExecutionError) as ctx:
-            backend.run("sleep infinity")
+            _make(c).run("sleep infinity")
         self.assertEqual(ctx.exception.exit_code, 124)
 
     def test_docker_layer_failure_raises(self):
-        backend, _ = _make_backend()
-
-        def boom(cmd):
-            raise RuntimeError("container stopped")
-
-        backend._container.exec_run = boom
         with self.assertRaises(ToolExecutionError):
-            backend.run("ls")
+            _make(_DockerErrorContainer()).run("ls")
 
     def test_multiline_command_natively_supported(self):
-        # bash -c 下多行命令天然合法，不再需要 base64 单行化
-        backend, container = _make_backend(
-            behave=lambda cmd: _ok(b"done\n" + M.encode() + b"0\n")
-        )
-        result = backend.run("cat <<'EOF'\nhello\nEOF")
+        c = FakeContainer(stdout="done\n")
+        result = _make(c).run("cat <<'EOF'\nhello\nEOF")
         self.assertIn("done", result)
         self.assertNotIn(M, result)
 
 
 class CwdPersistenceTest(unittest.TestCase):
-    """验收：cd 跨命令持久（对齐 tmux 的 shell 持续存活语义）。"""
+    """验收 #3：cwd 跨命令持久，由 shell 回报的 PWD 标记驱动（I1 根治）。"""
 
-    def test_cwd_tracked_after_cd(self):
-        backend, _ = _make_backend(behave=lambda cmd: _ok(M.encode() + b"0\n"))
-        backend.run("cd /app/src")
+    def test_cwd_tracked_from_pwd_marker(self):
+        # PWD 标记由【内层】shell 回报（内层 cd 可见）——CC 三轮 C-NEW-1 修复
+        c = FakeContainer(stdout="", pwd="/app/src")
+        backend = _make(c)
+        backend.run("cd /app/src && make")
         self.assertEqual(backend._cwd, "/app/src")
-        backend.run("make")
-        # 第二条命令应显式 cd 回 /app/src
-        self.assertIn("cd /app/src", backend._container.calls[1])
 
-    def test_cwd_relative_resolution(self):
-        backend, _ = _make_backend(behave=lambda cmd: _ok(M.encode() + b"0\n"))
+    def test_cwd_tracked_after_cd_dash(self):
+        """I1-2 回归：cd - 不再毒化 _cwd（shell 回报真实落点）。"""
+        c = FakeContainer(stdout="", pwd="/previous/dir")
+        backend = _make(c)
         backend._cwd = "/app"
-        backend.run("cd src")
+        backend.run("cd -")
+        self.assertEqual(backend._cwd, "/previous/dir")
+
+    def test_cwd_tracked_after_cd_and_cmd(self):
+        """I1-1 回归：cd X && cmd 形态也被正确跟踪。"""
+        c = FakeContainer(stdout="", pwd="/app/src")
+        backend = _make(c)
+        backend.run("cd /app/src && make")
         self.assertEqual(backend._cwd, "/app/src")
 
-    def test_cd_failure_raises_permanent(self):
-        # cd 目标不存在 → cd 失败 → 无标记行 + 非 124 → permanent 语义
-        backend, _ = _make_backend(behave=lambda cmd: _fail(1, b""))
-        backend._cwd = "/nonexistent_xyz"
+    def test_cwd_tracked_with_space_path(self):
+        """I1-3 回归：带空格路径。"""
+        c = FakeContainer(stdout="", pwd="/app/my dir")
+        backend = _make(c)
+        backend.run("cd '/app/my dir'")
+        self.assertEqual(backend._cwd, "/app/my dir")
+
+    def test_cd_failure_keeps_old_cwd(self):
+        """cd 失败：内层非零退出、无 PWD 行 → real_cwd=None → 保留旧 _cwd。"""
+
+        class _CdFail:
+            def __init__(self):
+                self.calls = []
+
+            def exec_run(self, cmd, workdir=None, demux=True):
+                self.calls.append(" ".join(cmd))
+                # cd 失败：内层 bash 非零退出且无 PWD 行，外层照印 EXIT:1
+                return _ExecResult(0, (f"{M}1\n".encode(), b"cd: /nope: No such file or directory\n"))
+
+        c = _CdFail()
+        backend = _make(c)
+        backend._cwd = "/app"
         with self.assertRaises(ToolExecutionError) as ctx:
             backend.run("ls")
-        self.assertIn("cd", str(ctx.exception).lower())
+        self.assertEqual(ctx.exception.exit_code, 1)
+        self.assertEqual(backend._cwd, "/app")  # 旧 cwd 保留
+
+    def test_second_command_restores_cwd(self):
+        """持久性闭环：第二条命令的 wrapped 里应显式 cd 回上次落点。"""
+        c = FakeContainer(stdout="", pwd="/app/src")
+        backend = _make(c)
+        backend.run("cd /app/src")
+        backend.run("make")
+        self.assertIn("cd /app/src", c.calls[1])
+
 
 
 if __name__ == "__main__":
