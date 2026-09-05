@@ -18,6 +18,14 @@
 - **TB 6 题对照重跑（方案 D 落地后）：6/6 resolved**（run 2026-09-06__01-42-13；全量 54 项测试绿）
 - **遗留**：I2 挂起待 TB 真容器观察（timeout -k 待加）、I4 重试幂等声明待入、再过一轮 CC 审核
 
+### 2026-09-06 续3：I3 L2 模型回路补齐（Issue #6，两轮审核遗留清零）
+
+- **问题**：此前 L2 只测到工具函数返回 + logger 事件，未验证"permanent 错误回模型后模型真的换路"的完整闭环——审核员点名的"测试缺口导致假绿"风险
+- **架构关键**（Agno 2.x 内部结构，inspect 源码确认）：工具循环在 Model 基类的 response() 里，不在 Agent.run 里——因此 fake 必须覆写 **invoke()（单次模型调用）**，把 tool_calls 写进 assistant_message 交给【基类循环】消费；覆写 response() 会绕过 Agno 的工具执行循环，测了个寂寞
+- **ScriptedChatModel**：继承 agno Model 基类，按脚本吐 tool_calls/content，seen_messages 记录每轮模型真实收到的消息
+- **两个决定性断言**：① permanent 换路建议真的到达模型（messages 里有"永久性错误"）且模型行为改变（改调 ls 不再 cat，无盲目重试）；② transient 重试对模型不可见（messages 无失败痕迹）但 trace 重试事件完整保留
+- 全量 **65 项绿**；I3 清零，v0.5 四个子任务全部达成
+
 ### 2026-09-06 续2：#5 错误预算（Issue #5）
 
 - **问题**：#4 的重试是单次调用内的（RETRY_MAX=2 每次独立计数），跨调用无记忆——同一错误在 20 步任务里反复撞，每次都白烧 2 次重试步数
