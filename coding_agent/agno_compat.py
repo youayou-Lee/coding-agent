@@ -41,6 +41,7 @@ class OpenAICompatChat(OpenAIChat):
         if thinking:
             kwargs.setdefault("extra_body", thinking)
         self._logger = kwargs.pop("logger", None)
+        self._plan_provider = kwargs.pop("plan_provider", None)  # v0.6 #19：每步计划注入钩子
         super().__init__(*args, **kwargs)
 
     def response(self, messages, **kwargs):
@@ -52,6 +53,14 @@ class OpenAICompatChat(OpenAIChat):
             content = getattr(resp, "content", None) or ""
             logger.llm_response(str(content)[:500])
         return resp
+    def invoke(self, messages, assistant_message, **kwargs):
+        # v0.6 #19 C1 修复：每步把计划全文注入消息列表最新端（副本，不污染历史）
+        if getattr(self, "_plan_provider", None) is not None:
+            from coding_agent.plan_injection import inject_plan
+
+            messages = inject_plan(list(messages), self._plan_provider())
+        return super().invoke(messages, assistant_message, **kwargs)
+
     def __deepcopy__(self, memo):
         import copy as _copy
 
@@ -90,8 +99,9 @@ class ProviderChat(OpenAICompatChat):
       - 全挂 → 原样抛最后一个异常
     """
 
-    def __init__(self, chain, *, logger=None):
+    def __init__(self, chain, *, logger=None, plan_provider=None):
         head = chain.current
+        self._plan_provider = plan_provider  # v0.6 #19：每步计划注入钩子
         super().__init__(
             id=head.model,
             base_url=head.base_url,
@@ -125,6 +135,11 @@ class ProviderChat(OpenAICompatChat):
         return self._active_client().get_client()
 
     def invoke(self, messages, assistant_message, **kwargs):
+        # v0.6 #19 C1 修复：多 provider 路径同样注入计划
+        if getattr(self, "_plan_provider", None) is not None:
+            from coding_agent.plan_injection import inject_plan
+
+            messages = inject_plan(list(messages), self._plan_provider())
         cfg = self._chain.current
 
         def attempt(active_cfg):

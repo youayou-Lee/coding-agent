@@ -46,6 +46,11 @@ class ScriptedChatModel(Model):
         yield self.invoke(messages, assistant_message, **kwargs)
 
     def invoke(self, messages, assistant_message, **kwargs):
+        # 与生产 ProviderChat.invoke 同样的注入行为（fake 语义保真）：末尾追加计划消息
+        from coding_agent.plan_injection import inject_plan
+
+        plan = self._plan_ref[0] if getattr(self, "_plan_ref", None) else None
+        messages = inject_plan(list(messages), plan)
         self.seen_messages.append(list(messages))
         item = self.script.pop(0) if self.script else {"content": "done"}
         if "tool" in item:
@@ -75,8 +80,14 @@ class ScriptedChatModel(Model):
 def _run(script, max_steps=8):
     with tempfile.TemporaryDirectory() as tmp:
         logger = RunLogger(Path(tmp))
-        agent = make_coding_agent(_NoOpBackend(), logger, max_steps=max_steps, workdir=Path(tmp))
+        plan_ref: list = []  # 与 agent 闭包 plan_state 同步（测试观察口）
+        agent = make_coding_agent(
+            _NoOpBackend(), logger, max_steps=max_steps, workdir=Path(tmp), plan_ref=plan_ref
+        )
         model = ScriptedChatModel(script)
+        # fake 注入源 = agent 闭包的真实 plan_state（经 plan_ref 桥接）——
+        # fake 与生产走同一条 inject_plan 路径（C1 教训：fake 语义保真）
+        model._plan_ref = plan_ref
         agent.model = model
         agent.run("多步任务：探索、写脚本、跑测试", stream=False)
         return model, logger
@@ -84,10 +95,11 @@ def _run(script, max_steps=8):
 
 class PlanLoopTest(unittest.TestCase):
     def test_plan_created_and_injected_to_model(self):
-        """信号 1+2：plan 建立计划；后续轮次模型上下文含计划全文（分叉 1=A）。"""
+        """信号 1+2：plan 建立计划；后续轮次计划注入到上下文最新端（分叉 1=A）。"""
         script = [
             {"tool": "plan", "args": {"steps": ["探索目录", "写脚本", "跑测试"]}},
             {"tool": "send_command", "args": {"command": "ls"}},
+            {"tool": "send_command", "args": {"command": "pwd"}},
             {"content": "按计划执行完毕"},
         ]
         model, logger = _run(script)
@@ -96,7 +108,25 @@ class PlanLoopTest(unittest.TestCase):
         round2 = model.round_text(2)
         self.assertIn("探索目录", round2)
         self.assertIn("0/3 done", round2)
-        self.assertIn("rev0", round2)
+
+    def test_plan_injected_at_latest_position(self):
+        """C1 防回归（决定性）：计划必须出现在消息列表【最新端】，且不随轮次沉底。"""
+        script = [
+            {"tool": "plan", "args": {"steps": ["探索目录", "写脚本", "跑测试"]}},
+            {"tool": "send_command", "args": {"command": "ls"}},
+            {"tool": "send_command", "args": {"command": "pwd"}},
+            {"tool": "send_command", "args": {"command": "date"}},
+            {"content": "done"},
+        ]
+        model, logger = _run(script)
+        for rnd in range(2, len(model.seen_messages) + 1):
+            msgs = model.seen_messages[rnd - 1]
+            plan_positions = [
+                i for i, m in enumerate(msgs)
+                if "当前计划" in str(getattr(m, "content", ""))
+            ]
+            self.assertTrue(plan_positions, f"轮 {rnd} 无计划注入")
+            self.assertEqual(plan_positions[-1], len(msgs) - 1, f"轮 {rnd} 计划不在最新端")
 
     def test_todo_marks_and_progress_updates(self):
         """信号 3：勾销联动——第 3 轮模型看到的进度反映 todo 更新。"""

@@ -108,18 +108,32 @@ def make_coding_agent(
     workdir: Path | None = None,
     debug: bool = False,
     budget_threshold: int = 3,
+    plan_ref: list | None = None,  # 测试观察口：外部可变容器 [Plan|None]，与闭包 plan_state 同步
 ) -> Agent:
     workdir = workdir or Path.cwd()
     budget = ErrorBudget(threshold=budget_threshold)  # 跨调用错误预算（#5）
     plan_state: Plan | None = None  # v0.6 计划-执行分离（#19）：None=尚未制定
 
+    def _sync_plan_ref():
+        # plan_ref[0] 与闭包 plan_state 保持同对象（测试观察 + fake 注入源）
+        if plan_ref is not None:
+            plan_ref.clear()
+            plan_ref.append(plan_state)
+
     @tool
     def plan(steps: list[str]) -> str:
         """多步任务开始时提交计划：steps 为按执行顺序排列的步骤描述列表。"""
         nonlocal plan_state
+        if plan_state is not None:
+            # I2 修复：静默重建会清零 revision 计数，软约束可被绕过——拒绝并引导走 revise
+            return (
+                "(错误: 计划已存在。要修改计划请调用 revise_plan（保留修订历史）；"
+                "确实要推倒重来则先说明现有计划的根本性问题再调用 revise_plan)"
+            )
         plan_state = Plan.from_descriptions(steps)
+        _sync_plan_ref()
         logger.event("plan_created", steps=len(steps), revision=plan_state.revision)
-        return f"计划已建立（{len(steps)} 步）：\n{plan_state.render()}"
+        return f"计划已建立（{len(steps)} 步）。全文已注入你的上下文（[当前计划] 段），请按步骤执行。"
 
     @tool
     def todo(step_id: int, status: str) -> str:
@@ -131,14 +145,17 @@ def make_coding_agent(
         except (KeyError, ValueError) as exc:
             return f"(错误: {exc})"
         logger.event("todo_marked", step_id=step_id, status=status, progress=plan_state.progress)
-        return f"已更新：#{step_id} {step.description} → {status}\n{plan_state.render()}"
+        return f"已更新：#{step_id} {step.description} → {status}（进度 {plan_state.progress}，最新计划见 [当前计划] 段）"
 
     @tool
     def revise_plan(steps: list[str], reason: str = "") -> str:
         """修订计划：执行中发现原计划有误时提交新的完整步骤列表。必须说明 reason（修订历史会注入你的上下文，频繁无因修订可见）。"""
         if plan_state is None:
             return "(错误: 尚未制定计划，先调用 plan)"
+        if not reason.strip():
+            return "(错误: revise_plan 必须说明 reason——为什么原计划有误。修订历史会注入你的上下文，无因修订可见且影响信任)"
         plan_state.revise(steps, reason=reason)
+        _sync_plan_ref()
         logger.event(
             "plan_revised",
             revision=plan_state.revision,
@@ -256,15 +273,19 @@ def make_coding_agent(
         logger.tool_call("write_file", {"path": path}, result, ok=not result.startswith("(错误"), step=0)
         return result
 
+    def _plan_provider():
+        return plan_state  # 闭包读取最新计划状态（每步注入源）
+
     providers = load_providers()
     if len(providers) == 1:
         model = OpenAICompatChat(
             id=LLM_MODEL,
             logger=logger,
+            plan_provider=_plan_provider,
         )
     else:
         # 多 provider：链式故障切换（重试 + failover）
-        model = ProviderChat(ProviderChain(providers), logger=logger)
+        model = ProviderChat(ProviderChain(providers), logger=logger, plan_provider=_plan_provider)
 
     return Agent(
         name="编程Agent",
