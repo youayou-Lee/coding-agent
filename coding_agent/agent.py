@@ -21,6 +21,7 @@ from coding_agent.config import LLM_MODEL
 from coding_agent.error_budget import ErrorBudget
 from coding_agent.errors import ErrorKind, ToolErrorType, classify_error
 from coding_agent.logging_util import RunLogger
+from coding_agent.plan import Plan
 from coding_agent.provider import ProviderChain, load_providers
 from coding_agent.terminal import LocalBackend, TerminalBackend, ToolExecutionError
 
@@ -31,6 +32,7 @@ SYSTEM_INSTRUCTIONS = [
     "命令失败时，阅读错误输出并修复（测试失败信息会回流给你）。",
     "不要假设文件内容，先读再改。",
     "任务完成后，用一条消息总结你做了什么、验证结果如何。",
+    "多步任务（≥3 个动作）必须先制定计划：调用 plan 工具提交步骤清单，之后严格按计划执行，完成一步用 todo 勾销一步（status=done）。执行中发现计划有误时调用 revise_plan 修订（须说明原因），不要默默偏离。每次决策时你都能看到完整计划与修订历史——频繁修订会 visible 在你的上下文里，请先想清楚再动手。",
 ]
 
 # transient 重试参数：封顶重试次数与指数退避基数（真正"预算"在 #5）
@@ -106,9 +108,61 @@ def make_coding_agent(
     workdir: Path | None = None,
     debug: bool = False,
     budget_threshold: int = 3,
+    plan_ref: list | None = None,  # 测试观察口：外部可变容器 [Plan|None]，与闭包 plan_state 同步
 ) -> Agent:
     workdir = workdir or Path.cwd()
     budget = ErrorBudget(threshold=budget_threshold)  # 跨调用错误预算（#5）
+    plan_state: Plan | None = None  # v0.6 计划-执行分离（#19）：None=尚未制定
+
+    def _sync_plan_ref():
+        # plan_ref[0] 与闭包 plan_state 保持同对象（测试观察 + fake 注入源）
+        if plan_ref is not None:
+            plan_ref.clear()
+            plan_ref.append(plan_state)
+
+    @tool
+    def plan(steps: list[str]) -> str:
+        """多步任务开始时提交计划：steps 为按执行顺序排列的步骤描述列表。"""
+        nonlocal plan_state
+        if plan_state is not None:
+            # I2 修复：静默重建会清零 revision 计数，软约束可被绕过——拒绝并引导走 revise
+            return (
+                "(错误: 计划已存在。要修改计划请调用 revise_plan（保留修订历史）；"
+                "确实要推倒重来则先说明现有计划的根本性问题再调用 revise_plan)"
+            )
+        plan_state = Plan.from_descriptions(steps)
+        _sync_plan_ref()
+        logger.event("plan_created", steps=len(steps), revision=plan_state.revision)
+        return f"计划已建立（{len(steps)} 步）。全文已注入你的上下文（[当前计划] 段），请按步骤执行。"
+
+    @tool
+    def todo(step_id: int, status: str) -> str:
+        """勾销计划步骤：step_id 为计划中的步骤编号，status 取 done/blocked/pending。"""
+        if plan_state is None:
+            return "(错误: 尚未制定计划，先调用 plan)"
+        try:
+            step = plan_state.mark_step(step_id, status)
+        except (KeyError, ValueError) as exc:
+            return f"(错误: {exc})"
+        logger.event("todo_marked", step_id=step_id, status=status, progress=plan_state.progress)
+        return f"已更新：#{step_id} {step.description} → {status}（进度 {plan_state.progress}，最新计划见 [当前计划] 段）"
+
+    @tool
+    def revise_plan(steps: list[str], reason: str = "") -> str:
+        """修订计划：执行中发现原计划有误时提交新的完整步骤列表。必须说明 reason（修订历史会注入你的上下文，频繁无因修订可见）。"""
+        if plan_state is None:
+            return "(错误: 尚未制定计划，先调用 plan)"
+        if not reason.strip():
+            return "(错误: revise_plan 必须说明 reason——为什么原计划有误。修订历史会注入你的上下文，无因修订可见且影响信任)"
+        plan_state.revise(steps, reason=reason)
+        _sync_plan_ref()
+        logger.event(
+            "plan_revised",
+            revision=plan_state.revision,
+            steps=len(steps),
+            reason=reason[:200] or "(未说明)",
+        )
+        return f"计划已修订至 rev{plan_state.revision}（原因已记录，最新计划见 [当前计划] 段）"
 
     @tool
     def send_command(command: str) -> str:
@@ -219,20 +273,24 @@ def make_coding_agent(
         logger.tool_call("write_file", {"path": path}, result, ok=not result.startswith("(错误"), step=0)
         return result
 
+    def _plan_provider():
+        return plan_state  # 闭包读取最新计划状态（每步注入源）
+
     providers = load_providers()
     if len(providers) == 1:
         model = OpenAICompatChat(
             id=LLM_MODEL,
             logger=logger,
+            plan_provider=_plan_provider,
         )
     else:
         # 多 provider：链式故障切换（重试 + failover）
-        model = ProviderChat(ProviderChain(providers), logger=logger)
+        model = ProviderChat(ProviderChain(providers), logger=logger, plan_provider=_plan_provider)
 
     return Agent(
         name="编程Agent",
         model=model,
-        tools=[send_command, list_files, read_file, write_file],
+        tools=[plan, todo, revise_plan, send_command, list_files, read_file, write_file],
         instructions=SYSTEM_INSTRUCTIONS,
         tool_call_limit=max_steps,
         debug_mode=debug,
