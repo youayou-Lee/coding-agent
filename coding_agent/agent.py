@@ -121,8 +121,8 @@ def make_coding_agent(
             plan_ref.append(plan_state)
 
     @tool
-    def plan(steps: list[str]) -> str:
-        """多步任务开始时提交计划：steps 为按执行顺序排列的步骤描述列表。"""
+    def plan(steps: list) -> str:
+        """多步任务开始时提交计划：steps 为按执行顺序排列的步骤描述列表（字符串或结构化对象均可，自动归一化）。"""
         nonlocal plan_state
         if plan_state is not None:
             # I2 修复：静默重建会清零 revision 计数，软约束可被绕过——拒绝并引导走 revise
@@ -148,7 +148,7 @@ def make_coding_agent(
         return f"已更新：#{step_id} {step.description} → {status}（进度 {plan_state.progress}，最新计划见 [当前计划] 段）"
 
     @tool
-    def revise_plan(steps: list[str], reason: str = "") -> str:
+    def revise_plan(steps: list, reason: str = "") -> str:
         """修订计划：执行中发现原计划有误时提交新的完整步骤列表。必须说明 reason（修订历史会注入你的上下文，频繁无因修订可见）。"""
         if plan_state is None:
             return "(错误: 尚未制定计划，先调用 plan)"
