@@ -111,5 +111,27 @@ class PlanTest(unittest.TestCase):
         self.assertEqual([s.description for s in restored.steps], [s.description for s in p.steps])
 
 
+class CoerceTest(unittest.TestCase):
+    """TB 80 题基线实测（2026-09-07）：GLM 传 dict 列表导致 pydantic 拒绝 → run 崩溃。"""
+
+    def test_dict_with_info_key(self):
+        p = Plan.from_descriptions([{"info": "Check/installed tools", "step": 1}, {"info": "Download", "step": 2}])
+        self.assertEqual(p.steps[0].description, "[step 1] Check/installed tools")
+        self.assertEqual(p.steps[1].description, "[step 2] Download")
+
+    def test_dict_without_known_keys(self):
+        p = Plan.from_descriptions([{"a": "x", "b": 2}])
+        self.assertEqual(p.steps[0].description, "a: x | b: 2")
+
+    def test_plain_strings_unchanged(self):
+        p = Plan.from_descriptions([" 简单步骤 "])
+        self.assertEqual(p.steps[0].description, "简单步骤")
+
+    def test_revise_also_coerces(self):
+        p = Plan.from_descriptions(["旧"])
+        p.revise([{"info": "新步骤", "step": 1}], reason="测试")
+        self.assertIn("新步骤", p.steps[0].description)
+
+
 if __name__ == "__main__":
     unittest.main()

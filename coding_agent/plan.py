@@ -49,8 +49,30 @@ class Plan:
 
     # --- 构造 ---
     @classmethod
+    def _coerce_description(cls, item) -> str:
+        """容错归一化：模型可能把步骤传成 dict（如 {'info': ..., 'step': 1}）而非 str。
+
+        实测（TB 80 题基线 2026-09-07）：GLM 5.3-flash 会输出结构化 dict 列表，
+        pydantic 严格校验直接拒绝 → 整个 agent run 崩溃。描述里的信息是真实的，
+        只是形态不对——提取常见键合并保留，比报错更符合工具的容错职责。
+        """
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, dict):
+            # 常见键优先：info/description/step/task/desc/name/content
+            for key in ("info", "description", "desc", "task", "name", "content", "title"):
+                if key in item and isinstance(item[key], str) and item[key].strip():
+                    prefix = f"[step {item['step']}] " if "step" in item and item["step"] not in (None, "") else ""
+                    return f"{prefix}{item[key].strip()}"
+            # 兜底：所有标量值拼接
+            parts = [f"{k}: {v}" for k, v in item.items() if isinstance(v, (str, int, float))]
+            return " | ".join(parts) if parts else str(item)
+        return str(item).strip()
+
+    @classmethod
     def from_descriptions(cls, descriptions: list[str]) -> Plan:
-        return cls(steps=[PlanStep(id=i, description=d) for i, d in enumerate(descriptions, 1)])
+        coerced = [cls._coerce_description(d) for d in descriptions]
+        return cls(steps=[PlanStep(id=i, description=d) for i, d in enumerate(coerced, 1)])
 
     # --- Todo 勾销 ---
     def mark_step(self, step_id: int, status: str) -> PlanStep:
@@ -87,7 +109,8 @@ class Plan:
         reason 由模型提供（为什么改计划）——修订历史随计划注入上下文，
         频繁无理由修订会在上下文中可见，形成软压力。
         """
-        self.steps = [PlanStep(id=i, description=d) for i, d in enumerate(new_descriptions, 1)]
+        coerced = [self._coerce_description(d) for d in new_descriptions]
+        self.steps = [PlanStep(id=i, description=d) for i, d in enumerate(coerced, 1)]
         self.revision += 1
         self.revision_history.append(f"rev{self.revision}: {reason or '(未说明原因)'}")
 
