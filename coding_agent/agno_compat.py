@@ -138,7 +138,8 @@ class ProviderChat(OpenAICompatChat):
         return self._active_client().get_client()
 
     def invoke(self, messages, assistant_message, **kwargs):
-        # v0.6 #19 C1 修复：多 provider 路径同样注入计划
+        # 注入实际由基类 OpenAICompatChat.invoke 完成（此处 _plan_provider 已接线），
+        # 保留判断仅为防御基类行为变化
         if getattr(self, "_plan_provider", None) is not None:
             from coding_agent.plan_injection import inject_plan
 

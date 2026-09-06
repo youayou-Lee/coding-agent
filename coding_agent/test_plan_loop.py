@@ -178,9 +178,13 @@ class ProductionWiringTest(unittest.TestCase):
 
     def test_single_provider_wiring(self):
         import os
+        # Minor-1 修复：钉死单 provider 分支（不受 .env 的 LLM_PROVIDERS 影响）
+        self._saved_providers = os.environ.pop("LLM_PROVIDERS", None)
         os.environ.setdefault("LLM_API_KEY", "k")
         os.environ.setdefault("LLM_BASE_URL", "https://x.test")
         os.environ.setdefault("LLM_MODEL", "m")
+        self.addCleanup(lambda: os.environ.pop("LLM_PROVIDERS", None)
+                        if self._saved_providers is None else os.environ.__setitem__("LLM_PROVIDERS", self._saved_providers))
         with tempfile.TemporaryDirectory() as tmp:
             agent = make_coding_agent(_NoOpBackend(), RunLogger(Path(tmp)), workdir=Path(tmp))
             # 单 provider 路径：OpenAICompatChat
