@@ -22,9 +22,23 @@ def build_plan_message(plan: Plan | None) -> Message | None:
     return Message(role="system", content=f"{_PLAN_TAG}\n{plan.render()}")
 
 
-def inject_plan(messages: list, plan: Plan | None) -> list:
-    """返回追加了计划消息的 messages **副本**（不修改原列表=不污染历史）。"""
+def has_plan_message(messages: list) -> bool:
+    """消息列表里是否已存在计划注入消息（幂等保护用）。"""
+    return any(
+        str(getattr(m, "content", "")).startswith(_PLAN_TAG)
+        for m in messages
+    )
+
+
+def inject_plan(messages: list, plan: Plan | None, *, skip_if_present: bool = False) -> list:
+    """返回追加了计划消息的 messages **副本**（不修改原列表=不污染历史）。
+
+    skip_if_present=True 时，若列表已含计划消息则原样返回（幂等）——
+    用于 ProviderChat 链路（retry/failover 多次经过 invoke）防双重注入。
+    """
     plan_msg = build_plan_message(plan)
     if plan_msg is None:
+        return messages
+    if skip_if_present and has_plan_message(messages):
         return messages
     return [*messages, plan_msg]

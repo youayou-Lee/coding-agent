@@ -162,7 +162,7 @@ def make_coding_agent(
             steps=len(steps),
             reason=reason[:200] or "(未说明)",
         )
-        return f"计划已修订至 rev{plan_state.revision}（原因已记录）：\n{plan_state.render()}"
+        return f"计划已修订至 rev{plan_state.revision}（原因已记录，最新计划见 [当前计划] 段）"
 
     @tool
     def send_command(command: str) -> str:

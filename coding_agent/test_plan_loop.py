@@ -173,5 +173,45 @@ class PlanLoopTest(unittest.TestCase):
         self.assertIn("尚未制定计划", round2)
 
 
+class ProductionWiringTest(unittest.TestCase):
+    """Critical-2 防回归：生产两条 invoke 路径的 plan_provider 接线必须保真。"""
+
+    def test_single_provider_wiring(self):
+        import os
+        os.environ.setdefault("LLM_API_KEY", "k")
+        os.environ.setdefault("LLM_BASE_URL", "https://x.test")
+        os.environ.setdefault("LLM_MODEL", "m")
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = make_coding_agent(_NoOpBackend(), RunLogger(Path(tmp)), workdir=Path(tmp))
+            # 单 provider 路径：OpenAICompatChat
+            self.assertIsNotNone(getattr(agent.model, "_plan_provider", None),
+                                "单 provider 路径 plan_provider 未接线")
+
+    def test_provider_chat_wiring_not_overwritten(self):
+        """C-NEW-2 防回归：ProviderChat 的 plan_provider 不被 super().__init__ 覆写为 None。"""
+        from coding_agent.agno_compat import ProviderChat
+        from coding_agent.provider import ProviderChain, ProviderConfig
+
+        chain = ProviderChain([ProviderConfig("fake", "https://x.test", "k", "m")])
+        sentinel = lambda: None
+        pc = ProviderChat(chain, plan_provider=sentinel)
+        self.assertIs(pc._plan_provider, sentinel,
+                     "ProviderChat._plan_provider 被 super().__init__ 覆写（C-NEW-2 复活）")
+
+    def test_inject_idempotent(self):
+        """I-1 防回归：ProviderChat 链路 retry/failover 多次经过 invoke 不双重注入。"""
+        from coding_agent.plan import Plan
+        from coding_agent.plan_injection import inject_plan
+
+        plan = Plan.from_descriptions(["a", "b"])
+        msgs = [{"role": "user", "content": "hi"}]
+        once = inject_plan(list(msgs), plan, skip_if_present=True)
+        twice = inject_plan(once, plan, skip_if_present=True)
+        plan_count = sum(1 for m in once if str(getattr(m, "content", "")).startswith("[当前计划"))
+        plan_count_twice = sum(1 for m in twice if str(getattr(m, "content", "")).startswith("[当前计划"))
+        self.assertEqual(plan_count, 1)
+        self.assertEqual(plan_count_twice, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

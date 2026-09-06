@@ -54,11 +54,12 @@ class OpenAICompatChat(OpenAIChat):
             logger.llm_response(str(content)[:500])
         return resp
     def invoke(self, messages, assistant_message, **kwargs):
-        # v0.6 #19 C1 修复：每步把计划全文注入消息列表最新端（副本，不污染历史）
+        # v0.6 #19 C1 修复：每步把计划全文注入消息列表最新端（副本，不污染历史）。
+        # 幂等保护：ProviderChat 链路重试/failover 会多次经过本函数，已注入则不重复。
         if getattr(self, "_plan_provider", None) is not None:
-            from coding_agent.plan_injection import inject_plan
+            from coding_agent.plan_injection import inject_plan, has_plan_message
 
-            messages = inject_plan(list(messages), self._plan_provider())
+            messages = inject_plan(list(messages), self._plan_provider(), skip_if_present=True)
         return super().invoke(messages, assistant_message, **kwargs)
 
     def __deepcopy__(self, memo):
@@ -101,11 +102,13 @@ class ProviderChat(OpenAICompatChat):
 
     def __init__(self, chain, *, logger=None, plan_provider=None):
         head = chain.current
-        self._plan_provider = plan_provider  # v0.6 #19：每步计划注入钩子
+        # C1 修复：plan_provider 透传给 super 的 kwargs（OpenAICompatChat.__init__ 统一处理），
+        # 不在此处赋值——否则会被 super().__init__ 的 kwargs.pop 覆写为 None
         super().__init__(
             id=head.model,
             base_url=head.base_url,
             api_key=head.api_key,
+            plan_provider=plan_provider,  # C1 修复：透传（super 统一 pop）
             extra_body=(
                 {"thinking": {"type": "enabled", "thinking_budget": head.thinking}}
                 if head.thinking
