@@ -21,6 +21,7 @@ from coding_agent.config import LLM_MODEL
 from coding_agent.error_budget import ErrorBudget
 from coding_agent.errors import ErrorKind, ToolErrorType, classify_error
 from coding_agent.logging_util import RunLogger
+from coding_agent.plan import Plan
 from coding_agent.provider import ProviderChain, load_providers
 from coding_agent.terminal import LocalBackend, TerminalBackend, ToolExecutionError
 
@@ -31,6 +32,7 @@ SYSTEM_INSTRUCTIONS = [
     "命令失败时，阅读错误输出并修复（测试失败信息会回流给你）。",
     "不要假设文件内容，先读再改。",
     "任务完成后，用一条消息总结你做了什么、验证结果如何。",
+    "多步任务（≥3 个动作）必须先制定计划：调用 plan 工具提交步骤清单，之后严格按计划执行，完成一步用 todo 勾销一步。执行中发现计划有误时调用 revise_plan 修订，不要默默偏离。",
 ]
 
 # transient 重试参数：封顶重试次数与指数退避基数（真正"预算"在 #5）
@@ -109,6 +111,36 @@ def make_coding_agent(
 ) -> Agent:
     workdir = workdir or Path.cwd()
     budget = ErrorBudget(threshold=budget_threshold)  # 跨调用错误预算（#5）
+    plan_state: Plan | None = None  # v0.6 计划-执行分离（#19）：None=尚未制定
+
+    @tool
+    def plan(steps: list[str]) -> str:
+        """多步任务开始时提交计划：steps 为按执行顺序排列的步骤描述列表。"""
+        nonlocal plan_state
+        plan_state = Plan.from_descriptions(steps)
+        logger.event("plan_created", steps=len(steps), revision=plan_state.revision)
+        return f"计划已建立（{len(steps)} 步）：\n{plan_state.render()}"
+
+    @tool
+    def todo(step_id: int, status: str) -> str:
+        """勾销计划步骤：step_id 为计划中的步骤编号，status 取 done/blocked/pending。"""
+        if plan_state is None:
+            return "(错误: 尚未制定计划，先调用 plan)"
+        try:
+            step = plan_state.mark_step(step_id, status)
+        except (KeyError, ValueError) as exc:
+            return f"(错误: {exc})"
+        logger.event("todo_marked", step_id=step_id, status=status, progress=plan_state.progress)
+        return f"已更新：#{step_id} {step.description} → {status}\n{plan_state.render()}"
+
+    @tool
+    def revise_plan(steps: list[str]) -> str:
+        """修订计划：执行中发现原计划有误时，提交新的完整步骤列表（旧状态作废）。"""
+        if plan_state is None:
+            return "(错误: 尚未制定计划，先调用 plan)"
+        plan_state.revise(steps)
+        logger.event("plan_revised", revision=plan_state.revision, steps=len(steps))
+        return f"计划已修订至 rev{plan_state.revision}：\n{plan_state.render()}"
 
     @tool
     def send_command(command: str) -> str:
@@ -232,7 +264,7 @@ def make_coding_agent(
     return Agent(
         name="编程Agent",
         model=model,
-        tools=[send_command, list_files, read_file, write_file],
+        tools=[plan, todo, revise_plan, send_command, list_files, read_file, write_file],
         instructions=SYSTEM_INSTRUCTIONS,
         tool_call_limit=max_steps,
         debug_mode=debug,
