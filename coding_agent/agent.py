@@ -10,6 +10,7 @@ v0.5 #4：send_command 接住 ToolExecutionError → 体检（classify_error）�
   semantic  （跑通但结果可疑）→ 原样透传交模型判断。
 """
 
+import os
 import time
 from pathlib import Path
 
@@ -276,16 +277,32 @@ def make_coding_agent(
     def _plan_provider():
         return plan_state  # 闭包读取最新计划状态（每步注入源）
 
-    providers = load_providers()
-    if len(providers) == 1:
-        model = OpenAICompatChat(
+    # 协议选择：GLM_API_PROTOCOL=anthropic 走 Anthropic 兼容端点（新 key 资源包所在），
+    # 默认 openai 兼容链路（glm 主 + deepseek 备）
+    protocol = os.environ.get("GLM_API_PROTOCOL", "openai").lower()
+
+    if protocol == "anthropic":
+        from coding_agent.anthropic_compat import AnthropicCompatChat
+
+        model = AnthropicCompatChat(
             id=LLM_MODEL,
-            logger=logger,
-            plan_provider=_plan_provider,
+            api_key=os.environ.get("GLM_API_KEY", ""),
+            max_tokens=16384,
+            client_params={"base_url": "https://open.bigmodel.cn/api/anthropic"},
         )
+        model.set_logger(logger)
+        model.set_plan_provider(_plan_provider)
     else:
-        # 多 provider：链式故障切换（重试 + failover）
-        model = ProviderChat(ProviderChain(providers), logger=logger, plan_provider=_plan_provider)
+        providers = load_providers()
+        if len(providers) == 1:
+            model = OpenAICompatChat(
+                id=LLM_MODEL,
+                logger=logger,
+                plan_provider=_plan_provider,
+            )
+        else:
+            # 多 provider：链式故障切换（重试 + failover）
+            model = ProviderChat(ProviderChain(providers), logger=logger, plan_provider=_plan_provider)
 
     return Agent(
         name="编程Agent",
