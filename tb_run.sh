@@ -20,6 +20,8 @@ cd "$PROJECT_DIR"
 
 # 1. 代理：socks 代理会破坏 httpx/litellm
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# anthropic SDK (httpx2) 对 socks 代理变量的处理不同，额外清 NO_PROXY 之外的所有变体
+unset NO_PROXY no_proxy 2>/dev/null || true
 
 # 2. 配置：解析项目根 .env（KEY=VALUE，忽略注释/空行），不覆盖已有环境变量
 _seen=":"

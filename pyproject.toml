@@ -4,6 +4,7 @@ version = "0.5.0"
 requires-python = ">=3.12"
 dependencies = [
     "agno>=2.8.7",
+    "anthropic>=1.4.0",
     "httpx>=0.28.1",
     "openai>=2.53.0",
 ]
