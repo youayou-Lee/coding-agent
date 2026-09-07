@@ -20,8 +20,7 @@ class AnthropicCompatChat(Claude):
 
     def __init__(self, *args, **kwargs):
         kwargs.pop("plan_provider", None)  # 兼容签名（Claude 基类不接受未知参数）
-        kwargs.pop("logger", None)  # Claude 基类不接受 logger，改为属性挂接
-        self._logger = None  # 在 super().__init__ 后挂
+        kwargs.pop("logger", None)  # Claude 基类不接受 logger，改为属性挂接（set_logger）
         super().__init__(*args, **kwargs)
         self._logger = None
 
@@ -32,18 +31,23 @@ class AnthropicCompatChat(Claude):
         self._plan_provider = provider
 
     def response(self, messages, **kwargs):
-        # 计划注入（与 OpenAI 路径同构：副本追加，不污染历史）
-        if getattr(self, "_plan_provider", None) is not None:
-            from coding_agent.plan_injection import inject_plan
-
-            messages = inject_plan(list(messages), self._plan_provider())
+        # 仅 logger 记录（注入在 invoke 层——与 OpenAI 路径同构，每轮工具循环都注入）
         logger = getattr(self, "_logger", None)
         if logger is not None:
             logger.llm_call(messages, "(pending)")
         resp = super().response(messages, **kwargs)
         if logger is not None:
-            logger.llm_response(str(getattr(resp, "content", ""))[:500])
+            logger.llm_response(str(getattr(resp, "content", "") or "")[:500])
         return resp
+
+    def invoke(self, messages, assistant_message, **kwargs):
+        # C1 同构修复：注入必须在 invoke 层（Agno 工具循环每轮调 invoke），
+        # 否则 revise_plan 后新计划永远不会进入模型上下文（CC 八轮审核 I-1）
+        if getattr(self, "_plan_provider", None) is not None:
+            from coding_agent.plan_injection import inject_plan
+
+            messages = inject_plan(list(messages), self._plan_provider())
+        return super().invoke(messages, assistant_message, **kwargs)
 
     def __deepcopy__(self, memo):
         import copy as _copy
