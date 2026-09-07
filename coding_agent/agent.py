@@ -18,6 +18,7 @@ from agno.agent import Agent
 from agno.tools.decorator import tool
 
 from coding_agent.agno_compat import OpenAICompatChat, ProviderChat
+from coding_agent import config as _cfg
 from coding_agent.config import LLM_MODEL
 from coding_agent.error_budget import ErrorBudget
 from coding_agent.errors import ErrorKind, ToolErrorType, classify_error
@@ -286,9 +287,9 @@ def make_coding_agent(
 
         model = AnthropicCompatChat(
             id=LLM_MODEL,
-            api_key=os.environ.get("GLM_API_KEY", ""),
+            api_key=_cfg.LLM_API_KEY,  # I-2 修复：走 config 回退链（LLM_API_KEY > GLM_API_KEY > DEEPSEEK_API_KEY）
             max_tokens=16384,
-            client_params={"base_url": "https://open.bigmodel.cn/api/anthropic"},
+            client_params={"base_url": os.environ.get("GLM_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")},
         )
         model.set_logger(logger)
         model.set_plan_provider(_plan_provider)
