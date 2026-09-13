@@ -34,8 +34,11 @@ SYSTEM_INSTRUCTIONS = [
     "命令失败时，阅读错误输出并修复（测试失败信息会回流给你）。",
     "不要假设文件内容，先读再改。",
     "任务完成后，用一条消息总结你做了什么、验证结果如何。",
-    "多步任务（≥3 个动作）必须先制定计划：调用 plan 工具提交步骤清单，之后严格按计划执行，完成一步用 todo 勾销一步（status=done）。执行中发现计划有误时调用 revise_plan 修订（须说明原因），不要默默偏离。每次决策时你都能看到完整计划与修订历史——频繁修订会 visible 在你的上下文里，请先想清楚再动手。",
 ]
+
+# plan 相关指令单独成条：CODING_AGENT_DISABLE_PLAN_TOOLS 摘除 plan 工具时必须同步摘除，
+# 否则模型被告知"必须制定计划"却找不到工具（#27 对照实验的对照开关）
+PLAN_INSTRUCTION = "多步任务（≥3 个动作）必须先制定计划：调用 plan 工具提交步骤清单，之后严格按计划执行，完成一步用 todo 勾销一步（status=done）。执行中发现计划有误时调用 revise_plan 修订（须说明原因），不要默默偏离。每次决策时你都能看到完整计划与修订历史——频繁修订会 visible 在你的上下文里，请先想清楚再动手。"
 
 # transient 重试参数：封顶重试次数与指数退避基数（真正"预算"在 #5）
 RETRY_MAX = 2
@@ -115,6 +118,12 @@ def make_coding_agent(
     workdir = workdir or Path.cwd()
     budget = ErrorBudget(threshold=budget_threshold)  # 跨调用错误预算（#5）
     plan_state: Plan | None = None  # v0.6 计划-执行分离（#19）：None=尚未制定
+
+    # #27 对照开关：置 1 摘除 plan/todo/revise_plan 三工具 + 指令 + 注入接线，
+    # 得到"同一份代码 − Plan"的纯净 ReAct 基线（对照组与实验组唯一差异 = 此环境变量）
+    plan_disabled = os.environ.get("CODING_AGENT_DISABLE_PLAN_TOOLS", "").strip().lower() in {
+        "1", "true", "yes",
+    }
 
     def _sync_plan_ref():
         # plan_ref[0] 与闭包 plan_state 保持同对象（测试观察 + fake 注入源）
@@ -292,24 +301,33 @@ def make_coding_agent(
             client_params={"base_url": os.environ.get("GLM_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")},
         )
         model.set_logger(logger)
-        model.set_plan_provider(_plan_provider)
+        if not plan_disabled:
+            model.set_plan_provider(_plan_provider)
     else:
         providers = load_providers()
         if len(providers) == 1:
             model = OpenAICompatChat(
                 id=LLM_MODEL,
                 logger=logger,
-                plan_provider=_plan_provider,
+                plan_provider=None if plan_disabled else _plan_provider,
             )
         else:
             # 多 provider：链式故障切换（重试 + failover）
-            model = ProviderChat(ProviderChain(providers), logger=logger, plan_provider=_plan_provider)
+            model = ProviderChat(
+                ProviderChain(providers),
+                logger=logger,
+                plan_provider=None if plan_disabled else _plan_provider,
+            )
+
+    tools = [send_command, list_files, read_file, write_file]
+    if not plan_disabled:
+        tools = [plan, todo, revise_plan] + tools
 
     return Agent(
         name="编程Agent",
         model=model,
-        tools=[plan, todo, revise_plan, send_command, list_files, read_file, write_file],
-        instructions=SYSTEM_INSTRUCTIONS,
+        tools=tools,
+        instructions=SYSTEM_INSTRUCTIONS if plan_disabled else SYSTEM_INSTRUCTIONS + [PLAN_INSTRUCTION],
         tool_call_limit=max_steps,
         debug_mode=debug,
     )
