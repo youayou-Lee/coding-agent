@@ -98,44 +98,214 @@ class ProviderChainTest(unittest.TestCase):
 
 
 class LoadProvidersTest(unittest.TestCase):
-    def test_fallback_single_provider(self):
-        import os
-        old = {k: os.environ.get(k) for k in ("LLM_PROVIDERS", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
-        try:
-            os.environ.pop("LLM_PROVIDERS", None)
-            os.environ["LLM_API_KEY"] = "k"
-            os.environ["LLM_BASE_URL"] = "https://x.test"
-            os.environ["LLM_MODEL"] = "m"
-            ps = load_providers()
-            self.assertEqual(len(ps), 1)
-            self.assertEqual(ps[0].name, "default")
-        finally:
-            for k, v in old.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+    """providers.yaml 配置化（#25）：校验显式失败、禁用跳过、协议一致性。"""
 
-    def test_multi_provider_chain(self):
+    def _write_yaml(self, content: str) -> str:
         import os
-        env = {
-            "LLM_PROVIDERS": "glm,deepseek",
-            "GLM_API_KEY": "k1", "GLM_BASE_URL": "https://glm.test", "GLM_MODEL": "glm-5.3-flash",
-            "DEEPSEEK_API_KEY": "k2", "DEEPSEEK_BASE_URL": "https://api.deepseek.com", "DEEPSEEK_MODEL": "deepseek-chat",
-        }
-        old = {k: os.environ.get(k) for k in env}
-        try:
-            os.environ.update(env)
-            os.environ.pop("GLM_THINKING", None)  # 隔离宿主 .env 的 GLM_THINKING=low
-            ps = load_providers()
-            self.assertEqual([p.name for p in ps], ["glm", "deepseek"])
-            self.assertEqual(ps[0].thinking, None)  # 未设 GLM_THINKING
-        finally:
-            for k, v in old.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        import tempfile
+        from pathlib import Path
+
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        self.addCleanup(lambda: os.unlink(path))
+        return path
+
+    def _with_config(self, yaml_content: str, extra_env: dict | None = None):
+        """在临时 providers.yaml 下调用 load_providers，返回结果或异常。"""
+        import os
+        from unittest import mock
+
+        path = self._write_yaml(yaml_content)
+        env = {"PROVIDERS_CONFIG": path, **(extra_env or {})}
+        with mock.patch.dict(os.environ, env):
+            return load_providers()
+
+    def test_load_enabled_skips_disabled(self):
+        ps = self._with_config(
+            """
+providers:
+  - name: glm
+    protocol: anthropic
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: glm-5.3-flash
+    enabled: true
+    on_failover: strict
+  - name: deepseek
+    protocol: openai
+    api_key_env: TEST_DS_KEY
+    base_url: https://ds.test
+    model: deepseek-chat
+    enabled: false
+""",
+            {"TEST_GLM_KEY": "k1"},
+        )
+        self.assertEqual([p.name for p in ps], ["glm"])
+        self.assertEqual(ps[0].protocol, "anthropic")
+        self.assertEqual(ps[0].on_failover, "strict")
+
+    def test_missing_yaml_raises(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"PROVIDERS_CONFIG": "/nonexistent/providers.yaml"}):
+            with self.assertRaises(FileNotFoundError):
+                load_providers()
+
+    def test_enabled_provider_missing_key_raises(self):
+        # 静默跳过的反模式废除：启用 provider 缺 key 必须响亮失败
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    api_key_env: TEST_ABSENT_KEY
+    base_url: https://glm.test
+    model: m
+""",
+                {"TEST_ABSENT_KEY": ""},  # 显式置空，隔离宿主环境
+            )
+        self.assertIn("TEST_ABSENT_KEY", str(ctx.exception))
+
+    def test_missing_api_key_env_field_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    base_url: https://glm.test
+    model: m
+"""
+            )
+        self.assertIn("api_key_env", str(ctx.exception))
+
+    def test_mixed_protocol_chain_raises(self):
+        # #25 分叉：协议异构不通——混协议启动即报错
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    protocol: anthropic
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: m
+  - name: ds
+    protocol: openai
+    api_key_env: TEST_DS_KEY
+    base_url: https://ds.test
+    model: m2
+""",
+                {"TEST_GLM_KEY": "k1", "TEST_DS_KEY": "k2"},
+            )
+        self.assertIn("协议混用", str(ctx.exception))
+
+    def test_all_disabled_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: m
+    enabled: false
+"""
+            )
+        self.assertIn("enabled", str(ctx.exception))
+
+    def test_invalid_protocol_raises(self):
+        with self.assertRaises(ValueError):
+            self._with_config(
+                """
+providers:
+  - name: glm
+    protocol: grpc
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: m
+""",
+                {"TEST_GLM_KEY": "k1"},
+            )
+
+    def test_duplicate_name_raises(self):
+        # 重名会让 ProviderChat 的 client 缓存（按 name 键控）在 failover 时
+        # 静默复用前一个 provider 的 client（旧 key/base_url）——启动即拦
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: m1
+  - name: glm
+    api_key_env: TEST_GLM_KEY2
+    base_url: https://glm2.test
+    model: m2
+""",
+                {"TEST_GLM_KEY": "k1", "TEST_GLM_KEY2": "k2"},
+            )
+        self.assertIn("重复", str(ctx.exception))
+
+    def test_enabled_non_bool_raises(self):
+        # enabled: "false" 是 truthy——不校验会被当启用，报错位置让人困惑
+        with self.assertRaises(ValueError) as ctx:
+            self._with_config(
+                """
+providers:
+  - name: glm
+    api_key_env: TEST_GLM_KEY
+    base_url: https://glm.test
+    model: m
+    enabled: "false"
+""",
+                {"TEST_GLM_KEY": "k1"},
+            )
+        self.assertIn("布尔", str(ctx.exception))
+
+    def test_non_dict_structure_raises(self):
+        with self.assertRaises(ValueError):
+            self._with_config("- just\n- a list\n")
+
+
+class StrictFailoverTest(unittest.TestCase):
+    """on_failover=strict：重试耗尽不切链，立即抛错（实验模式宁断不混，#25）。"""
+
+    def test_strict_raises_instead_of_switching(self):
+        chain = make_chain([
+            ProviderConfig("glm", "https://glm.test", "k1", "m1", on_failover="strict"),
+            ProviderConfig("deepseek", "https://ds.test", "k2", "m2"),
+        ])
+        calls = []
+        events = []
+
+        def attempt(p):
+            calls.append(p.name)
+            raise api_error(500)
+
+        with self.assertRaises(openai.APIStatusError):
+            chain.execute(attempt, on_event=lambda e, d: events.append(e))
+        self.assertEqual(calls, ["glm"] * 3)  # 只重试 glm，从未碰 deepseek
+        self.assertIn("provider_strict_stop", events)
+        self.assertNotIn("provider_failover", events)
+        self.assertFalse(chain.exhausted)  # 游标没动过
+
+    def test_alert_provider_still_switches(self):
+        chain = make_chain([
+            ProviderConfig("glm", "https://glm.test", "k1", "m1", on_failover="alert"),
+            ProviderConfig("deepseek", "https://ds.test", "k2", "m2"),
+        ])
+        calls = []
+
+        def attempt(p):
+            calls.append(p.name)
+            raise api_error(500)
+
+        with self.assertRaises(openai.APIStatusError):
+            chain.execute(attempt)
+        self.assertEqual(calls, ["glm"] * 3 + ["deepseek"] * 3)
 
 
 if __name__ == "__main__":

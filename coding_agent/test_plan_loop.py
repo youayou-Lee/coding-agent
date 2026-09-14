@@ -81,9 +81,20 @@ def _run(script, max_steps=8):
     with tempfile.TemporaryDirectory() as tmp:
         logger = RunLogger(Path(tmp))
         plan_ref: list = []  # 与 agent 闭包 plan_state 同步（测试观察口）
-        agent = make_coding_agent(
-            _NoOpBackend(), logger, max_steps=max_steps, workdir=Path(tmp), plan_ref=plan_ref
-        )
+        # #25：隔离宿主 providers.yaml——钉死 openai 单 provider 分支（model 随后被 fake 替换，
+        # 但 make_coding_agent 组装仍会真实走某条协议分支，不能依赖宿主 .env/key）
+        import os
+        from unittest import mock
+        import yaml as _yaml
+        cfg_path = Path(tmp) / "providers.yaml"
+        cfg_path.write_text(_yaml.safe_dump({"providers": [{
+            "name": "fake", "protocol": "openai", "api_key_env": "TEST_FAKE_KEY",
+            "base_url": "https://x.test", "model": "m",
+        }]}), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PROVIDERS_CONFIG": str(cfg_path), "TEST_FAKE_KEY": "k"}):
+            agent = make_coding_agent(
+                _NoOpBackend(), logger, max_steps=max_steps, workdir=Path(tmp), plan_ref=plan_ref
+            )
         model = ScriptedChatModel(script)
         # fake 注入源 = agent 闭包的真实 plan_state（经 plan_ref 桥接）——
         # fake 与生产走同一条 inject_plan 路径（C1 教训：fake 语义保真）
@@ -178,15 +189,23 @@ class ProductionWiringTest(unittest.TestCase):
 
     def test_single_provider_wiring(self):
         import os
-        # Minor-1 修复：钉死单 provider 分支（不受 .env 的 LLM_PROVIDERS 影响）
-        self._saved_providers = os.environ.pop("LLM_PROVIDERS", None)
-        os.environ.setdefault("LLM_API_KEY", "k")
-        os.environ.setdefault("LLM_BASE_URL", "https://x.test")
-        os.environ.setdefault("LLM_MODEL", "m")
-        self.addCleanup(lambda: os.environ.pop("LLM_PROVIDERS", None)
-                        if self._saved_providers is None else os.environ.__setitem__("LLM_PROVIDERS", self._saved_providers))
-        with tempfile.TemporaryDirectory() as tmp:
-            agent = make_coding_agent(_NoOpBackend(), RunLogger(Path(tmp)), workdir=Path(tmp))
+        # #25 配置化后用 PROVIDERS_CONFIG 钉死单 provider 分支（不受宿主 providers.yaml 影响）
+        import yaml as _yaml
+        with tempfile.TemporaryDirectory() as cfg_dir:
+            tmp_cfg = Path(cfg_dir) / "providers.yaml"
+            tmp_cfg.write_text(_yaml.safe_dump({"providers": [{
+                "name": "fake", "protocol": "openai", "api_key_env": "TEST_FAKE_KEY",
+                "base_url": "https://x.test", "model": "m",
+            }]}), encoding="utf-8")
+            saved = os.environ.pop("PROVIDERS_CONFIG", None)
+            saved_key = os.environ.pop("TEST_FAKE_KEY", None)
+            os.environ["PROVIDERS_CONFIG"] = str(tmp_cfg)
+            os.environ["TEST_FAKE_KEY"] = "k"
+            self.addCleanup(lambda: os.environ.pop("PROVIDERS_CONFIG", None)
+                            if saved is None else os.environ.__setitem__("PROVIDERS_CONFIG", saved))
+            self.addCleanup(lambda: os.environ.pop("TEST_FAKE_KEY", None)
+                            if saved_key is None else os.environ.__setitem__("TEST_FAKE_KEY", saved_key))
+            agent = make_coding_agent(_NoOpBackend(), RunLogger(Path(cfg_dir)), workdir=Path(cfg_dir))
             # 单 provider 路径：OpenAICompatChat
             self.assertIsNotNone(getattr(agent.model, "_plan_provider", None),
                                 "单 provider 路径 plan_provider 未接线")

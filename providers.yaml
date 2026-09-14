@@ -1,0 +1,24 @@
+# LLM provider 声明式配置（Issue #25）。
+#
+# 密钥不在本文件：api_key_env 指向 .env / shell 环境里的变量名，key 本体不进 git。
+# 校验规则（coding_agent/provider.py:load_providers）：
+#   - 本文件缺失 / 启用 provider 缺 key / 启用链内 protocol 混用 → 启动即报错，不静默降级
+#   - enabled: false 的 provider 不进链（显式禁用，保留声明作为实验口径记录）
+#   - on_failover: strict = 该 provider 重试耗尽即抛错终止（实验模式：不是它就别跑）
+#                  alert = 切下一个 provider 并留 provider_failover 事件（任务模式：完成优先）
+providers:
+  - name: glm
+    protocol: anthropic
+    api_key_env: GLM_API_KEY
+    base_url: https://open.bigmodel.cn/api/anthropic
+    model: glm-5.3-flash
+    thinking: low   # 仅 openai 协议链路消费（ProviderChat extra_body）；anthropic 路径不读
+    enabled: true
+    on_failover: strict
+  - name: deepseek
+    protocol: openai
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    enabled: false
+    on_failover: alert

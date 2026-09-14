@@ -19,7 +19,6 @@ from agno.tools.decorator import tool
 
 from coding_agent.agno_compat import OpenAICompatChat, ProviderChat
 from coding_agent import config as _cfg
-from coding_agent.config import LLM_MODEL
 from coding_agent.error_budget import ErrorBudget
 from coding_agent.errors import ErrorKind, ToolErrorType, classify_error
 from coding_agent.logging_util import RunLogger
@@ -287,32 +286,42 @@ def make_coding_agent(
     def _plan_provider():
         return plan_state  # 闭包读取最新计划状态（每步注入源）
 
-    # 协议选择：GLM_API_PROTOCOL=anthropic 走 Anthropic 兼容端点（新 key 资源包所在），
-    # 默认 openai 兼容链路（glm 主 + deepseek 备）
-    protocol = os.environ.get("GLM_API_PROTOCOL", "openai").lower()
+    # provider 组装（#25 配置化）：协议随 provider 声明（providers.yaml），
+    # 旧 GLM_API_PROTOCOL 全局开关废弃。load_providers 已保证链内协议一致。
+    providers = load_providers()
+    protocol = providers[0].protocol
 
     if protocol == "anthropic":
         from coding_agent.anthropic_compat import AnthropicCompatChat
 
+        if len(providers) > 1:
+            # anthropic 链暂不支持多 provider failover（协议一致约束下唯一模型场景）
+            raise ValueError(
+                f"protocol=anthropic 且启用 {len(providers)} 个 provider——anthropic 路径暂只支持单 provider，"
+                f"请 enabled 只留一个或改用 openai 协议链"
+            )
+        p = providers[0]
         model = AnthropicCompatChat(
-            id=LLM_MODEL,
-            api_key=_cfg.LLM_API_KEY,  # I-2 修复：走 config 回退链（LLM_API_KEY > GLM_API_KEY > DEEPSEEK_API_KEY）
+            id=p.model,
+            api_key=p.api_key,
             max_tokens=16384,
-            client_params={"base_url": os.environ.get("GLM_ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")},
+            client_params={"base_url": p.base_url},
         )
         model.set_logger(logger)
         if not plan_disabled:
             model.set_plan_provider(_plan_provider)
     else:
-        providers = load_providers()
         if len(providers) == 1:
+            p = providers[0]
             model = OpenAICompatChat(
-                id=LLM_MODEL,
+                id=p.model,
+                api_key=p.api_key,
+                base_url=p.base_url,
                 logger=logger,
                 plan_provider=None if plan_disabled else _plan_provider,
             )
         else:
-            # 多 provider：链式故障切换（重试 + failover）
+            # 多 provider：链式故障切换（重试 + 按 provider 声明的 failover 策略）
             model = ProviderChat(
                 ProviderChain(providers),
                 logger=logger,
